@@ -17,6 +17,12 @@ HardwareNFCConnectionPN532::HardwareNFCConnectionPN532() {
     memset(currentUid_, 0, sizeof(currentUid_));
 }
 
+HardwareNFCConnectionPN532::HardwareNFCConnectionPN532(const NfcReaderPins& pins)
+    : HardwareNFCConnectionPN532() {
+    explicitPins_ = pins;
+    hasExplicitPins_ = true;
+}
+
 HardwareNFCConnectionPN532::~HardwareNFCConnectionPN532() {
     delete pn532_;
 }
@@ -25,12 +31,12 @@ bool HardwareNFCConnectionPN532::begin() {
     // Runtime pin overrides (#201): PN532 shares the NFC pin slots (SS=NSS; BUSY unused).
     // BOARD_SHARED_SPI injects the same global bus used by the TFT.
     {
-        auto& cfg = ConfigurationManager::getInstance();
-        pinRst_ = cfg.getNfcPin(NfcPinId::Rst);
-        pinSs_  = cfg.getNfcPin(NfcPinId::Nss);
-        pinSck_ = cfg.getNfcPin(NfcPinId::Sck);
-        pinMosi_ = cfg.getNfcPin(NfcPinId::Mosi);
-        pinMiso_ = cfg.getNfcPin(NfcPinId::Miso);
+        const NfcReaderPins pins = hasExplicitPins_ ? explicitPins_ : NfcReaderPins::fromConfig();
+        pinRst_ = pins.rst;
+        pinSs_  = pins.nss;
+        pinSck_ = pins.sck;
+        pinMosi_ = pins.mosi;
+        pinMiso_ = pins.miso;
     }
 #if defined(BOARD_SHARED_SPI)
     if (!SharedSPIBus::begin(pinSck_, pinMiso_, pinMosi_, pinSs_, PIN_TFT_CS)) {

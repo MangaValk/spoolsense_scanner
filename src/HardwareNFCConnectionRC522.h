@@ -2,6 +2,7 @@
 #define HARDWARE_NFC_CONNECTION_RC522_H
 
 #include "NFCConnectionI.h"
+#include "NfcReaderPins.h"
 
 #include <MFRC522DriverPinSimple.h>
 #include <MFRC522DriverSPI.h>
@@ -16,6 +17,8 @@
 class HardwareNFCConnectionRC522 : public NFCConnectionI {
 public:
     HardwareNFCConnectionRC522();
+    // Use this pin set instead of the configured one (second reader on the bus)
+    explicit HardwareNFCConnectionRC522(const NfcReaderPins& pins);
     ~HardwareNFCConnectionRC522() override;
 
     bool begin() override;
@@ -76,6 +79,10 @@ private:
     // MFRC522 hardware cannot provide, so these callbacks fail explicitly.
     static opt_error_t unsupportedOpenPrintTagRead(void* ctx, uint8_t page, uint8_t* buffer);
     static opt_error_t unsupportedOpenPrintTagWrite(void* ctx, uint8_t page, const uint8_t* data);
+
+    // Explicit pin set from the constructor; otherwise begin() reads the config
+    NfcReaderPins explicitPins_;
+    bool hasExplicitPins_ = false;
 };
 
 #endif // HARDWARE_NFC_CONNECTION_RC522_H

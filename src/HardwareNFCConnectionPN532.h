@@ -3,12 +3,15 @@
 
 #include "NFCConnectionI.h"
 #include "BoardPins.h"
+#include "NfcReaderPins.h"
 #include <Adafruit_PN532.h>
 
 // NFC connection using Adafruit PN532 hardware (ISO14443A only)
 class HardwareNFCConnectionPN532 : public NFCConnectionI {
 public:
     HardwareNFCConnectionPN532();
+    // Use this pin set instead of the configured one (second reader on the bus)
+    explicit HardwareNFCConnectionPN532(const NfcReaderPins& pins);
     ~HardwareNFCConnectionPN532() override;
 
     bool begin() override;
@@ -47,6 +50,10 @@ private:
 
     // Reactivate the currently selected tag (needed before page reads after timeout)
     bool reactivateTag();
+
+    // Explicit pin set from the constructor; otherwise begin() reads the config
+    NfcReaderPins explicitPins_;
+    bool hasExplicitPins_ = false;
 };
 
 #endif // HARDWARE_NFC_CONNECTION_PN532_H

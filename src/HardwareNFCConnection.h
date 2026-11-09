@@ -3,6 +3,7 @@
 
 #include "NFCConnectionI.h"
 #include "BoardPins.h"
+#include "NfcReaderPins.h"
 #include <PN5180.h>
 #include <PN5180ISO15693.h>
 #include <PN5180ISO14443.h>
@@ -11,6 +12,8 @@
 class HardwareNFCConnection : public NFCConnectionI {
 public:
     HardwareNFCConnection();
+    // Use this pin set instead of the configured one (second reader on the bus)
+    explicit HardwareNFCConnection(const NfcReaderPins& pins);
     ~HardwareNFCConnection() override;
 
     bool begin() override;
@@ -72,6 +75,10 @@ private:
     // Static HAL callbacks
     static opt_error_t halReadPage(void* ctx, uint8_t page, uint8_t* buffer);
     static opt_error_t halWritePage(void* ctx, uint8_t page, const uint8_t* data);
+
+    // Explicit pin set from the constructor; otherwise begin() reads the config
+    NfcReaderPins explicitPins_;
+    bool hasExplicitPins_ = false;
 };
 
 #endif // HARDWARE_NFC_CONNECTION_H

@@ -42,6 +42,12 @@ HardwareNFCConnection::HardwareNFCConnection() {
     memset(&hal_, 0, sizeof(hal_));
 }
 
+HardwareNFCConnection::HardwareNFCConnection(const NfcReaderPins& pins)
+    : HardwareNFCConnection() {
+    explicitPins_ = pins;
+    hasExplicitPins_ = true;
+}
+
 HardwareNFCConnection::~HardwareNFCConnection() {
     delete nfc_;
     delete iso14443a_;
@@ -108,15 +114,16 @@ bool HardwareNFCConnection::begin() {
     if (PIN_PN5180_GPIO >= 0) pinMode(PIN_PN5180_GPIO, INPUT);
     if (PIN_PN5180_AUX >= 0) pinMode(PIN_PN5180_AUX, INPUT);
 
-    // Runtime pin overrides (#201): board defaults unless remapped in config
+    // Runtime pin overrides (#201): board defaults unless remapped in config,
+    // or the explicit set this connection was constructed with
     {
-        auto& cfg = ConfigurationManager::getInstance();
-        pinRst_  = cfg.getNfcPin(NfcPinId::Rst);
-        pinNss_  = cfg.getNfcPin(NfcPinId::Nss);
-        pinBusy_ = cfg.getNfcPin(NfcPinId::Busy);
-        pinSck_  = cfg.getNfcPin(NfcPinId::Sck);
-        pinMosi_ = cfg.getNfcPin(NfcPinId::Mosi);
-        pinMiso_ = cfg.getNfcPin(NfcPinId::Miso);
+        const NfcReaderPins pins = hasExplicitPins_ ? explicitPins_ : NfcReaderPins::fromConfig();
+        pinRst_  = pins.rst;
+        pinNss_  = pins.nss;
+        pinBusy_ = pins.busy;
+        pinSck_  = pins.sck;
+        pinMosi_ = pins.mosi;
+        pinMiso_ = pins.miso;
     }
 
     nfc_ = new PN5180ISO15693(pinNss_, pinBusy_, pinRst_,

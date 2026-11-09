@@ -44,6 +44,12 @@ HardwareNFCConnectionRC522::HardwareNFCConnectionRC522() {
     hal_.user_ctx = this;
 }
 
+HardwareNFCConnectionRC522::HardwareNFCConnectionRC522(const NfcReaderPins& pins)
+    : HardwareNFCConnectionRC522() {
+    explicitPins_ = pins;
+    hasExplicitPins_ = true;
+}
+
 HardwareNFCConnectionRC522::~HardwareNFCConnectionRC522() {
     releaseReader();
 }
@@ -63,13 +69,14 @@ void HardwareNFCConnectionRC522::releaseReader() {
 
 bool HardwareNFCConnectionRC522::begin() {
     // Implements NFCConnectionI::begin(). Pin values come from the same
-    // ConfigurationManager slots used by PN5180/PN532; BUSY is not used.
-    auto& cfg = ConfigurationManager::getInstance();
-    pinRst_ = cfg.getNfcPin(NfcPinId::Rst);
-    pinSs_ = cfg.getNfcPin(NfcPinId::Nss);
-    pinSck_ = cfg.getNfcPin(NfcPinId::Sck);
-    pinMosi_ = cfg.getNfcPin(NfcPinId::Mosi);
-    pinMiso_ = cfg.getNfcPin(NfcPinId::Miso);
+    // ConfigurationManager slots used by PN5180/PN532 (or the explicit set
+    // this connection was constructed with); BUSY is not used.
+    const NfcReaderPins pins = hasExplicitPins_ ? explicitPins_ : NfcReaderPins::fromConfig();
+    pinRst_ = pins.rst;
+    pinSs_ = pins.nss;
+    pinSck_ = pins.sck;
+    pinMosi_ = pins.mosi;
+    pinMiso_ = pins.miso;
 
     Serial.printf("RC522: starting — RST=%u SS=%u SCK=%u MOSI=%u MISO=%u SPI=%lu Hz\n",
                   pinRst_, pinSs_, pinSck_, pinMosi_, pinMiso_,
