@@ -64,6 +64,62 @@ struct GenericTagSpoolInfo {
     bool valid;
 };
 
+// Per-reader (per-lane) state. Everything here describes the tag on ONE
+// reader: its connection, the current spool, dedup/removal tracking, the
+// last parsed tag data, and that reader's write queue and write batch.
+// NFCManager keeps one entry per configured reader; with a single reader
+// there is exactly one, and behaviour is unchanged.
+struct NFCLaneState {
+    // Hardware connection (injected or created internally)
+    NFCConnectionI* connection_ = nullptr;
+    bool ownsConnection_ = false;
+
+    CurrentSpoolState currentSpool;
+    uint8_t lastSeenUid[8];      // ISO15693 uses 8-byte UID
+    uint8_t lastSeenUidLength = 0;
+    bool lastSeenValid = false;
+    unsigned long lastSeenMs = 0;            // millis() when last tag was detected
+    // UID hex of the tag selected on the reader during the current scan cycle.
+    // Scan-task-owned (written in scanLoop/scanOnce, read by validateWriteUid,
+    // which only ever runs below processWriteQueue on that same task), so it
+    // needs no mutex — same ownership rule as lastSeenUid. Unlike
+    // currentSpool.spool_id this is refreshed even when the cooldown dedup
+    // skips handleNewTag(), which is the whole point of #276.
+    char selectedUidHex_[17] = {0};
+    uint8_t absentMisses_ = 0;               // consecutive failed detects while a tag was present
+
+    // Last parsed TigerTag data (retained for /api/status)
+    TigerTagData lastTigerTag_;
+    bool lastTigerTagValid_ = false;
+
+    // Last parsed OpenTag3D data (retained for /api/status)
+    opentag3d_t lastOpenTag3D_;
+    bool lastOpenTag3DValid_ = false;
+    uint8_t openTag3DRawBaseline_[OT3D_MAX_PAYLOAD_SIZE] = {0};
+    size_t openTag3DRawBaselineLen_ = 0;
+    char openTag3DRawBaselineUid_[17] = {0};
+    bool openTag3DRawBaselineValid_ = false;
+    bool openTag3DMimeSeen_ = false;
+    OpenSpoolData lastOpenSpool_;
+    bool lastOpenSpoolValid_ = false;
+    BambuTagData lastBambuTag_;
+    bool lastBambuTagValid_ = false;
+
+    // Resolved Spoolman data for the current generic UID tag
+    GenericTagSpoolInfo lastGenericTagSpoolInfo_ = {};
+
+    // Write queue (FreeRTOS): requests for this reader's tag
+    QueueHandle_t writeQueue = nullptr;
+
+    // NFC watchdog: consecutive scan failures on this reader
+    uint32_t consecutiveFailures_ = 0;
+
+    // Write batch tracking: prevents tag re-reads during batched writes
+    volatile bool suppressReDetection_ = false;
+    char suppressReDetectionUid_[17] = {0};
+    volatile bool batchHadSuppressSync_ = false;  // Track if any write in batch had suppress_sync
+};
+
 class NFCManager {
 public:
     static NFCManager& getInstance();
@@ -101,10 +157,10 @@ public:
     bool waitForScanPaused(uint32_t timeoutMs);
     // Reader connection — only safe to drive directly while isScanPaused() is
     // true; otherwise it races the scan loop on the SPI bus.
-    NFCConnectionI* getDiagConnection() { return connection_; }
+    NFCConnectionI* getDiagConnection() { return lanes_[0].connection_; }
 
     // Dependency injection for testing
-    void setConnection(NFCConnectionI* conn) { connection_ = conn; }
+    void setConnection(NFCConnectionI* conn) { lanes_[0].connection_ = conn; }
     void resetWriteState() {
         // Reboot path: if a raw sidecar was still in flight, the physical
         // write never happened (the scan task is gone), so release it the same
@@ -115,9 +171,9 @@ public:
         openTag3DPatchRequestId_ = 0;
         memset(&openTag3DPatch_, 0, sizeof(openTag3DPatch_));
         // Drain write queue
-        if (writeQueue) {
+        if (lanes_[0].writeQueue) {
             NFCWriteRequest dummy;
-            while (xQueueReceive(writeQueue, &dummy, 0) == pdTRUE) {}
+            while (xQueueReceive(lanes_[0].writeQueue, &dummy, 0) == pdTRUE) {}
         }
     }
 
@@ -136,9 +192,6 @@ private:
     NFCManager(const NFCManager&) = delete;
     NFCManager& operator=(const NFCManager&) = delete;
 
-    // Hardware connection (injected or created internally)
-    NFCConnectionI* connection_ = nullptr;
-    bool ownsConnection_ = false;
 
     // Cooperative diagnostic pause handshake (self-test wizard, #253)
     volatile bool diagPauseRequested_ = false;
@@ -190,46 +243,13 @@ private:
 
 
     // State
-    CurrentSpoolState currentSpool;
-    uint8_t lastSeenUid[8];      // ISO15693 uses 8-byte UID
-    uint8_t lastSeenUidLength = 0;
-    bool lastSeenValid = false;
-    unsigned long lastSeenMs = 0;            // millis() when last tag was detected
     static constexpr unsigned long SCAN_COOLDOWN_MS = 3000;  // suppress re-reads within 3s
-    // UID hex of the tag selected on the reader during the current scan cycle.
-    // Scan-task-owned (written in scanLoop/scanOnce, read by validateWriteUid,
-    // which only ever runs below processWriteQueue on that same task), so it
-    // needs no mutex — same ownership rule as lastSeenUid. Unlike
-    // currentSpool.spool_id this is refreshed even when the cooldown dedup
-    // skips handleNewTag(), which is the whole point of #276.
-    char selectedUidHex_[17] = {0};
-    uint8_t absentMisses_ = 0;               // consecutive failed detects while a tag was present
     static constexpr uint8_t TAG_ABSENT_MISS_THRESHOLD = 3;  // ~150ms at 50ms poll before declaring removal
 
     // Recent spools history (RAM only, most recent first)
     RecentSpoolEntry recentSpools[MAX_RECENT_SPOOLS];
     size_t recentSpoolsCount = 0;
     void addToRecentSpoolsLocked();  // caller must hold tagMutex
-
-    // Last parsed TigerTag data (retained for /api/status)
-    TigerTagData lastTigerTag_;
-    bool lastTigerTagValid_ = false;
-
-    // Last parsed OpenTag3D data (retained for /api/status)
-    opentag3d_t lastOpenTag3D_;
-    bool lastOpenTag3DValid_ = false;
-    uint8_t openTag3DRawBaseline_[OT3D_MAX_PAYLOAD_SIZE] = {0};
-    size_t openTag3DRawBaselineLen_ = 0;
-    char openTag3DRawBaselineUid_[17] = {0};
-    bool openTag3DRawBaselineValid_ = false;
-    bool openTag3DMimeSeen_ = false;
-    OpenSpoolData lastOpenSpool_;
-    bool lastOpenSpoolValid_ = false;
-    BambuTagData lastBambuTag_;
-    bool lastBambuTagValid_ = false;
-
-    // Resolved Spoolman data for the current generic UID tag
-    GenericTagSpoolInfo lastGenericTagSpoolInfo_ = {};
 
     // Raw tag write staging slot (filled by HTTP/app tasks, consumed by the
     // scan task), owned by one request id at a time. Released on every
@@ -251,16 +271,15 @@ private:
     uint8_t ndefScratch_[532] = {0};
 
     void clearOpenTag3DRawBaselineLocked() {
-        openTag3DRawBaselineValid_ = false;
-        openTag3DRawBaselineLen_ = 0;
-        openTag3DRawBaselineUid_[0] = '\0';
+        scan_->openTag3DRawBaselineValid_ = false;
+        scan_->openTag3DRawBaselineLen_ = 0;
+        scan_->openTag3DRawBaselineUid_[0] = '\0';
     }
     bool writeRawTag(const NFCWriteRequest& request);
     opt_tag_t writeScratchTag_;   // Reused by scan task write path to avoid large stack frames
     AtomicWriteFields atomicWriteFields_;  // Sidecar for WRITE_ATOMIC (filled by HTTP, consumed by scan task)
 
     // Write queue (FreeRTOS)
-    QueueHandle_t writeQueue = nullptr;
     SemaphoreHandle_t tagMutex = nullptr;
 
     // Completed request tracking (circular buffer)
@@ -277,14 +296,16 @@ private:
     static constexpr uint32_t RECOVERY_THRESHOLD = 600;   // ~30s at 50ms/scan
     static constexpr uint32_t RESTART_THRESHOLD = 1200;    // ~60s at 50ms/scan
     static constexpr uint32_t NFC_WDT_TIMEOUT_S = 30;     // Task watchdog timeout
-    uint32_t consecutiveFailures_ = 0;
     void attemptRecovery();
     void reportWdtPhaseIfCrashed();  // wdt forensics: print pre-reset scan phase
 
-    // Write batch tracking: prevents tag re-reads during batched writes
-    volatile bool suppressReDetection_ = false;
-    char suppressReDetectionUid_[17] = {0};
-    volatile bool batchHadSuppressSync_ = false;  // Track if any write in batch had suppress_sync
+
+    // Per-reader state. scan_ is the lane the scan task is working on; it is
+    // only read and written on the scan task. Callers on other tasks address
+    // a lane explicitly (lanes_[0] while there is one reader).
+    static constexpr uint8_t MAX_LANES = 1;
+    NFCLaneState lanes_[MAX_LANES];
+    NFCLaneState* scan_ = &lanes_[0];
 };
 
 #endif // NFC_MANAGER_H

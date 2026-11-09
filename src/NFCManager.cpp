@@ -50,23 +50,23 @@ bool NFCManager::begin() {
     auto cleanupBeginAllocations = [this]() {
         if (completedMutex != nullptr) { vSemaphoreDelete(completedMutex); completedMutex = nullptr; }
         if (tagMutex != nullptr) { vSemaphoreDelete(tagMutex); tagMutex = nullptr; }
-        if (writeQueue != nullptr) { vQueueDelete(writeQueue); writeQueue = nullptr; }
-        if (ownsConnection_) {
-            delete connection_;
-            connection_ = nullptr;
-            ownsConnection_ = false;
+        if (lanes_[0].writeQueue != nullptr) { vQueueDelete(lanes_[0].writeQueue); lanes_[0].writeQueue = nullptr; }
+        if (lanes_[0].ownsConnection_) {
+            delete lanes_[0].connection_;
+            lanes_[0].connection_ = nullptr;
+            lanes_[0].ownsConnection_ = false;
         }
     };
 
     // Create hardware connection if none was injected
-    if (connection_ == nullptr) {
+    if (lanes_[0].connection_ == nullptr) {
 #ifndef NATIVE_TEST
-        connection_ = new (std::nothrow) HardwareNFCConnection();
-        if (connection_ == nullptr) {
+        lanes_[0].connection_ = new (std::nothrow) HardwareNFCConnection();
+        if (lanes_[0].connection_ == nullptr) {
             Serial.println("NFCManager: Failed to allocate connection");
             return false;
         }
-        ownsConnection_ = true;
+        lanes_[0].ownsConnection_ = true;
 #else
         // In native tests, connection must be injected via setConnection()
         Serial.println("NFCManager: No connection injected for native test");
@@ -74,15 +74,15 @@ bool NFCManager::begin() {
 #endif
     }
 
-    if (!connection_->begin()) {
+    if (!lanes_[0].connection_->begin()) {
         Serial.println("NFCManager: Failed to initialize connection");
         cleanupBeginAllocations();
         return false;
     }
 
     // Create FreeRTOS primitives
-    writeQueue = xQueueCreate(8, sizeof(NFCWriteRequest));
-    if (writeQueue == nullptr) {
+    lanes_[0].writeQueue = xQueueCreate(8, sizeof(NFCWriteRequest));
+    if (lanes_[0].writeQueue == nullptr) {
         Serial.println("NFCManager: Failed to create write queue");
         cleanupBeginAllocations();
         return false;
@@ -103,16 +103,16 @@ bool NFCManager::begin() {
     }
 
     // Initialize state
-    memset(&currentSpool, 0, sizeof(currentSpool));
-    memset(lastSeenUid, 0, sizeof(lastSeenUid));
-    lastSeenUidLength = 0;
-    lastSeenValid = false;
+    memset(&lanes_[0].currentSpool, 0, sizeof(lanes_[0].currentSpool));
+    memset(lanes_[0].lastSeenUid, 0, sizeof(lanes_[0].lastSeenUid));
+    lanes_[0].lastSeenUidLength = 0;
+    lanes_[0].lastSeenValid = false;
     memset(completedRequests, 0, sizeof(completedRequests));
     completedRequestsIndex = 0;
     memset(recentSpools, 0, sizeof(recentSpools));
     recentSpoolsCount = 0;
-    suppressReDetection_ = false;
-    suppressReDetectionUid_[0] = '\0';
+    lanes_[0].suppressReDetection_ = false;
+    lanes_[0].suppressReDetectionUid_[0] = '\0';
 
     Serial.println("NFCManager: Initialized successfully");
     return true;
@@ -125,7 +125,7 @@ bool NFCManager::getCurrentSpoolState(CurrentSpoolState& out) {
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
         return false;
     }
-    out = currentSpool;
+    out = lanes_[0].currentSpool;
     xSemaphoreGive(tagMutex);
     return true;
 }
@@ -133,8 +133,8 @@ bool NFCManager::getCurrentSpoolState(CurrentSpoolState& out) {
 bool NFCManager::getLastTigerTagData(TigerTagData& out) {
     if (tagMutex == nullptr) return false;
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
-    bool valid = lastTigerTagValid_;
-    if (valid) out = lastTigerTag_;
+    bool valid = lanes_[0].lastTigerTagValid_;
+    if (valid) out = lanes_[0].lastTigerTag_;
     xSemaphoreGive(tagMutex);
     return valid;
 }
@@ -142,8 +142,8 @@ bool NFCManager::getLastTigerTagData(TigerTagData& out) {
 bool NFCManager::getLastOpenTag3DData(opentag3d_t& out) {
     if (tagMutex == nullptr) return false;
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
-    bool valid = lastOpenTag3DValid_;
-    if (valid) out = lastOpenTag3D_;
+    bool valid = lanes_[0].lastOpenTag3DValid_;
+    if (valid) out = lanes_[0].lastOpenTag3D_;
     xSemaphoreGive(tagMutex);
     return valid;
 }
@@ -151,8 +151,8 @@ bool NFCManager::getLastOpenTag3DData(opentag3d_t& out) {
 bool NFCManager::getLastOpenSpoolData(OpenSpoolData& out) {
     if (tagMutex == nullptr) return false;
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
-    bool valid = lastOpenSpoolValid_;
-    if (valid) out = lastOpenSpool_;
+    bool valid = lanes_[0].lastOpenSpoolValid_;
+    if (valid) out = lanes_[0].lastOpenSpool_;
     xSemaphoreGive(tagMutex);
     return valid;
 }
@@ -160,22 +160,22 @@ bool NFCManager::getLastOpenSpoolData(OpenSpoolData& out) {
 bool NFCManager::getLastBambuTagData(BambuTagData& out) {
     if (tagMutex == nullptr) return false;
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
-    bool valid = lastBambuTagValid_;
-    if (valid) out = lastBambuTag_;
+    bool valid = lanes_[0].lastBambuTagValid_;
+    if (valid) out = lanes_[0].lastBambuTag_;
     xSemaphoreGive(tagMutex);
     return valid;
 }
 
 void NFCManager::setGenericTagSpoolInfo(const GenericTagSpoolInfo& info) {
     if (tagMutex && xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        lastGenericTagSpoolInfo_ = info;
+        lanes_[0].lastGenericTagSpoolInfo_ = info;
         xSemaphoreGive(tagMutex);
     }
 }
 
 void NFCManager::getGenericTagSpoolInfo(GenericTagSpoolInfo& out) {
     if (tagMutex && xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        out = lastGenericTagSpoolInfo_;
+        out = lanes_[0].lastGenericTagSpoolInfo_;
         xSemaphoreGive(tagMutex);
     } else {
         out = {};
@@ -184,14 +184,14 @@ void NFCManager::getGenericTagSpoolInfo(GenericTagSpoolInfo& out) {
 
 void NFCManager::clearGenericTagSpoolInfo() {
     if (tagMutex && xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        lastGenericTagSpoolInfo_ = {};
+        lanes_[0].lastGenericTagSpoolInfo_ = {};
         xSemaphoreGive(tagMutex);
     }
 }
 
 bool NFCManager::getNfcReaderInfo(char* buf, size_t len) const {
-    if (!connection_ || !buf || len == 0) return false;
-    connection_->getReaderInfo(buf, len);
+    if (!lanes_[0].connection_ || !buf || len == 0) return false;
+    lanes_[0].connection_->getReaderInfo(buf, len);
     return true;
 }
 
@@ -378,7 +378,7 @@ uint16_t NFCManager::readNdefPayload(const NdefRecord& rec, const uint8_t* pageD
     }
 
     if (pagesNeeded > UINT8_MAX || pagesNeeded * 4 > sizeof(ndefScratch_)) return 0;
-    uint16_t extRead = connection_->readISO14443Pages(startPage, (uint8_t)pagesNeeded,
+    uint16_t extRead = scan_->connection_->readISO14443Pages(startPage, (uint8_t)pagesNeeded,
                                                        ndefScratch_, sizeof(ndefScratch_));
     if (extRead <= offsetInPage) return 0;
 
@@ -407,7 +407,7 @@ void NFCManager::readAndProcessISO14443Tag(const uint8_t* uid, uint8_t uidLength
 
     uint8_t pageData[40] = {0};
     SCAN_PHASE(20);
-    uint16_t bytesRead = connection_->readISO14443Pages(4, 10, pageData, sizeof(pageData), true);
+    uint16_t bytesRead = scan_->connection_->readISO14443Pages(4, 10, pageData, sizeof(pageData), true);
     SCAN_PHASE(21);
 
     // Try TigerTag first (binary magic at offset 0)
@@ -476,48 +476,48 @@ void NFCManager::readAndProcessISO14443Tag(const uint8_t* uid, uint8_t uidLength
 
     // All reads done — halt tag if session is still active
     SCAN_PHASE(24);
-    connection_->endTagSession();
+    scan_->connection_->endTagSession();
     SCAN_PHASE(25);
 
     // Update shared state under mutex
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        memcpy(currentSpool.spool_id, scan.uid_hex, sizeof(scan.uid_hex));
-        memcpy(currentSpool.uid, uid, uidLength);
-        currentSpool.uid_length = uidLength;
-        currentSpool.present = true;
-        currentSpool.blank_tag_present = false;
-        currentSpool.variant = scan.variant;
-        currentSpool.cc_user_end = scan.cc_user_end;
-        memcpy(lastSeenUid, uid, uidLength);
-        lastSeenUidLength = uidLength;
-        lastSeenValid = true;
-        lastSeenMs = millis();
+        memcpy(scan_->currentSpool.spool_id, scan.uid_hex, sizeof(scan.uid_hex));
+        memcpy(scan_->currentSpool.uid, uid, uidLength);
+        scan_->currentSpool.uid_length = uidLength;
+        scan_->currentSpool.present = true;
+        scan_->currentSpool.blank_tag_present = false;
+        scan_->currentSpool.variant = scan.variant;
+        scan_->currentSpool.cc_user_end = scan.cc_user_end;
+        memcpy(scan_->lastSeenUid, uid, uidLength);
+        scan_->lastSeenUidLength = uidLength;
+        scan_->lastSeenValid = true;
+        scan_->lastSeenMs = millis();
 
         if (isTigerTag) {
-            currentSpool.kind = TagKind::TigerTag;
-            currentSpool.tag_data_valid = false;
-            lastTigerTag_ = tigerData;
-            lastTigerTagValid_ = true;
-            lastOpenTag3DValid_ = false;
-            openTag3DMimeSeen_ = false;
+            scan_->currentSpool.kind = TagKind::TigerTag;
+            scan_->currentSpool.tag_data_valid = false;
+            scan_->lastTigerTag_ = tigerData;
+            scan_->lastTigerTagValid_ = true;
+            scan_->lastOpenTag3DValid_ = false;
+            scan_->openTag3DMimeSeen_ = false;
             clearOpenTag3DRawBaselineLocked();
             Serial.printf("NFCManager: TigerTag detected — %s %s %s\n",
                           tigerData.brand_name, tigerData.material_name, tigerData.aspect1_name);
             LogBuffer::getInstance().logPrintf("TigerTag: %s %s %s\n",
                           tigerData.brand_name, tigerData.material_name, tigerData.aspect1_name);
         } else if (isOpenTag3D) {
-            currentSpool.kind = TagKind::OpenTag3D;
-            currentSpool.tag_data_valid = false;
-            lastOpenTag3D_ = ot3dData;
-            lastOpenTag3DValid_ = true;
-            openTag3DMimeSeen_ = true;
-            memcpy(openTag3DRawBaseline_, openTag3DPayloadScratch_, openTag3DBaselineLen);
-            openTag3DRawBaselineLen_ = openTag3DBaselineLen;
-            strncpy(openTag3DRawBaselineUid_, scan.uid_hex, sizeof(openTag3DRawBaselineUid_) - 1);
-            openTag3DRawBaselineUid_[sizeof(openTag3DRawBaselineUid_) - 1] = '\0';
-            openTag3DRawBaselineValid_ = true;
-            lastTigerTagValid_ = false;
-            lastOpenSpoolValid_ = false;
+            scan_->currentSpool.kind = TagKind::OpenTag3D;
+            scan_->currentSpool.tag_data_valid = false;
+            scan_->lastOpenTag3D_ = ot3dData;
+            scan_->lastOpenTag3DValid_ = true;
+            scan_->openTag3DMimeSeen_ = true;
+            memcpy(scan_->openTag3DRawBaseline_, openTag3DPayloadScratch_, openTag3DBaselineLen);
+            scan_->openTag3DRawBaselineLen_ = openTag3DBaselineLen;
+            strncpy(scan_->openTag3DRawBaselineUid_, scan.uid_hex, sizeof(scan_->openTag3DRawBaselineUid_) - 1);
+            scan_->openTag3DRawBaselineUid_[sizeof(scan_->openTag3DRawBaselineUid_) - 1] = '\0';
+            scan_->openTag3DRawBaselineValid_ = true;
+            scan_->lastTigerTagValid_ = false;
+            scan_->lastOpenSpoolValid_ = false;
             Serial.printf("NFCManager: OpenTag3D detected — %s %s %.2fmm %ug\n",
                           ot3dData.manufacturer, ot3dData.base_material,
                           opentag3d_diameter_mm(&ot3dData), ot3dData.target_weight_g);
@@ -525,25 +525,25 @@ void NFCManager::readAndProcessISO14443Tag(const uint8_t* uid, uint8_t uidLength
                           ot3dData.manufacturer, ot3dData.base_material,
                           opentag3d_diameter_mm(&ot3dData), ot3dData.target_weight_g);
         } else if (isOpenSpool) {
-            currentSpool.kind = TagKind::OpenSpoolTag;
-            currentSpool.tag_data_valid = false;
-            lastOpenSpool_ = openSpoolData;
-            lastOpenSpoolValid_ = true;
-            lastTigerTagValid_ = false;
-            lastOpenTag3DValid_ = false;
-            openTag3DMimeSeen_ = false;
+            scan_->currentSpool.kind = TagKind::OpenSpoolTag;
+            scan_->currentSpool.tag_data_valid = false;
+            scan_->lastOpenSpool_ = openSpoolData;
+            scan_->lastOpenSpoolValid_ = true;
+            scan_->lastTigerTagValid_ = false;
+            scan_->lastOpenTag3DValid_ = false;
+            scan_->openTag3DMimeSeen_ = false;
             clearOpenTag3DRawBaselineLocked();
             Serial.printf("NFCManager: OpenSpool detected — %s %s #%s\n",
                           openSpoolData.brand, openSpoolData.material, openSpoolData.color_hex);
             LogBuffer::getInstance().logPrintf("OpenSpool: %s %s #%s\n",
                           openSpoolData.brand, openSpoolData.material, openSpoolData.color_hex);
         } else {
-            currentSpool.kind = TagKind::GenericUidTag;
-            currentSpool.tag_data_valid = false;
-            lastTigerTagValid_ = false;
-            lastOpenTag3DValid_ = false;
-            lastOpenSpoolValid_ = false;
-            openTag3DMimeSeen_ = sawOpenTag3DMime;
+            scan_->currentSpool.kind = TagKind::GenericUidTag;
+            scan_->currentSpool.tag_data_valid = false;
+            scan_->lastTigerTagValid_ = false;
+            scan_->lastOpenTag3DValid_ = false;
+            scan_->lastOpenSpoolValid_ = false;
+            scan_->openTag3DMimeSeen_ = sawOpenTag3DMime;
             clearOpenTag3DRawBaselineLocked();
         }
         xSemaphoreGive(tagMutex);
@@ -557,7 +557,7 @@ void NFCManager::readAndProcessISO14443Tag(const uint8_t* uid, uint8_t uidLength
     } else if (isOpenTag3D) {
         sendOpenTag3DMessage(ot3dData);
     } else if (isOpenSpool) {
-        sendOpenSpoolMessage(currentSpool.spool_id, openSpoolData);
+        sendOpenSpoolMessage(scan_->currentSpool.spool_id, openSpoolData);
     } else {
         sendGenericTagMessage();
     }
@@ -566,37 +566,37 @@ void NFCManager::readAndProcessISO14443Tag(const uint8_t* uid, uint8_t uidLength
 // ── Scan loop helpers ───────────────────────────────────────
 
 bool NFCManager::prepareRF() {
-    if (consecutiveFailures_ >= RESTART_THRESHOLD) {
+    if (scan_->consecutiveFailures_ >= RESTART_THRESHOLD) {
         Serial.println("NFCManager: CRITICAL - too many consecutive failures, restarting ESP");
 #ifndef NATIVE_TEST
         delay(100);
         ESP.restart();
 #endif
     }
-    if (consecutiveFailures_ > 0 && (consecutiveFailures_ % RECOVERY_THRESHOLD) == 0) {
+    if (scan_->consecutiveFailures_ > 0 && (scan_->consecutiveFailures_ % RECOVERY_THRESHOLD) == 0) {
         attemptRecovery();
     }
 
     // Full hardware reset only when no tag present — reset cuts RF, de-powering passive tags
-    if (!lastSeenValid) {
-        connection_->reset();
+    if (!scan_->lastSeenValid) {
+        scan_->connection_->reset();
     }
-    if (!connection_->setupRF()) {
-        consecutiveFailures_++;
+    if (!scan_->connection_->setupRF()) {
+        scan_->consecutiveFailures_++;
         Serial.printf("NFCManager: setupRF() failed (consecutive=%lu, lastSeenValid=%d)\n",
-                      consecutiveFailures_, lastSeenValid ? 1 : 0);
-        if (lastSeenValid) {
+                      scan_->consecutiveFailures_, scan_->lastSeenValid ? 1 : 0);
+        if (scan_->lastSeenValid) {
             Serial.println("NFCManager: clearing lastSeenValid to force hardware reset");
-            lastSeenValid = false;
+            scan_->lastSeenValid = false;
         }
         return false;
     }
 
     // Give tag time to power up after RF field reset
-    if (!lastSeenValid) {
+    if (!scan_->lastSeenValid) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    consecutiveFailures_ = 0;
+    scan_->consecutiveFailures_ = 0;
     return true;
 }
 
@@ -604,26 +604,26 @@ bool NFCManager::prepareRF() {
 bool NFCManager::isSkippableDuplicate(const uint8_t* uid, uint8_t uidLength) {
     if (isDuplicateSpool(uid, uidLength)) return true;  // same tag as last scan cycle
 
-    if (!suppressReDetection_) return false;  // no active write batch
+    if (!scan_->suppressReDetection_) return false;  // no active write batch
 
     char uidHex[17];
     for (uint8_t i = 0; i < uidLength && i < 8; i++) {
         sprintf(uidHex + (i * 2), "%02X", uid[i]);
     }
     uidHex[uidLength * 2] = '\0';
-    return strcmp(uidHex, suppressReDetectionUid_) == 0;
+    return strcmp(uidHex, scan_->suppressReDetectionUid_) == 0;
 }
 
 void NFCManager::recordSelectedUid(const uint8_t* uid, uint8_t uidLength) {
     if (uidLength > 8) uidLength = 8;   // selectedUidHex_ holds 8 bytes max
     for (uint8_t i = 0; i < uidLength; i++) {
-        snprintf(selectedUidHex_ + (i * 2), 3, "%02X", uid[i]);
+        snprintf(scan_->selectedUidHex_ + (i * 2), 3, "%02X", uid[i]);
     }
-    selectedUidHex_[uidLength * 2] = '\0';
+    scan_->selectedUidHex_[uidLength * 2] = '\0';
 }
 
 void NFCManager::clearSelectedUid() {
-    selectedUidHex_[0] = '\0';
+    scan_->selectedUidHex_[0] = '\0';
 }
 
 void NFCManager::handleNewTag(uint8_t* uid, uint8_t uidLength) {
@@ -637,26 +637,26 @@ void NFCManager::handleNewTag(uint8_t* uid, uint8_t uidLength) {
         bool readOk = readBambuTag(uid, uidLength, bambuData);
 
         if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            memcpy(currentSpool.spool_id, scan.uid_hex, sizeof(scan.uid_hex));
-            memcpy(currentSpool.uid, uid, uidLength);
-            currentSpool.uid_length = uidLength;
-            currentSpool.present = true;
-            currentSpool.blank_tag_present = false;
-            currentSpool.kind = TagKind::BambuTag;
-            currentSpool.variant = NtagVariant::Unknown;
-            currentSpool.cc_user_end = 0;   // MIFARE Classic — no Type 2 CC
-            currentSpool.tag_data_valid = readOk;
-            lastBambuTagValid_ = readOk;
-            if (readOk) lastBambuTag_ = bambuData;
-            lastTigerTagValid_ = false;
-            lastOpenTag3DValid_ = false;
-            lastOpenSpoolValid_ = false;
-            openTag3DMimeSeen_ = false;
+            memcpy(scan_->currentSpool.spool_id, scan.uid_hex, sizeof(scan.uid_hex));
+            memcpy(scan_->currentSpool.uid, uid, uidLength);
+            scan_->currentSpool.uid_length = uidLength;
+            scan_->currentSpool.present = true;
+            scan_->currentSpool.blank_tag_present = false;
+            scan_->currentSpool.kind = TagKind::BambuTag;
+            scan_->currentSpool.variant = NtagVariant::Unknown;
+            scan_->currentSpool.cc_user_end = 0;   // MIFARE Classic — no Type 2 CC
+            scan_->currentSpool.tag_data_valid = readOk;
+            scan_->lastBambuTagValid_ = readOk;
+            if (readOk) scan_->lastBambuTag_ = bambuData;
+            scan_->lastTigerTagValid_ = false;
+            scan_->lastOpenTag3DValid_ = false;
+            scan_->lastOpenSpoolValid_ = false;
+            scan_->openTag3DMimeSeen_ = false;
             clearOpenTag3DRawBaselineLocked();
-            memcpy(lastSeenUid, uid, uidLength);
-            lastSeenUidLength = uidLength;
-            lastSeenValid = true;
-            lastSeenMs = millis();
+            memcpy(scan_->lastSeenUid, uid, uidLength);
+            scan_->lastSeenUidLength = uidLength;
+            scan_->lastSeenValid = true;
+            scan_->lastSeenMs = millis();
             xSemaphoreGive(tagMutex);
         }
 
@@ -683,8 +683,8 @@ void NFCManager::handleNewTag(uint8_t* uid, uint8_t uidLength) {
     }
 
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        lastOpenTag3DValid_ = false;
-        openTag3DMimeSeen_ = false;
+        scan_->lastOpenTag3DValid_ = false;
+        scan_->openTag3DMimeSeen_ = false;
         clearOpenTag3DRawBaselineLocked();
         xSemaphoreGive(tagMutex);
     }
@@ -694,8 +694,8 @@ void NFCManager::handleNewTag(uint8_t* uid, uint8_t uidLength) {
     for (int attempt = 0; attempt < 3 && !readOk; attempt++) {
         if (attempt > 0) {
             Serial.printf("NFCManager: Read attempt %d — resetting RF...\n", attempt + 1);
-            connection_->reset();
-            bool rfOk = connection_->setupRF();
+            scan_->connection_->reset();
+            bool rfOk = scan_->connection_->setupRF();
             Serial.printf("NFCManager: setupRF after reset: %s\n", rfOk ? "OK" : "FAILED");
             vTaskDelay(pdMS_TO_TICKS(100));  // let RF stabilize after reset
         }
@@ -711,22 +711,22 @@ void NFCManager::handleNewTag(uint8_t* uid, uint8_t uidLength) {
     Serial.println("NFCManager: readAndParseTag() failed after retries - treating as blank tag");
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         for (uint8_t i = 0; i < uidLength && i < 8; i++) {
-            sprintf(currentSpool.spool_id + (i * 2), "%02X", uid[i]);
+            sprintf(scan_->currentSpool.spool_id + (i * 2), "%02X", uid[i]);
         }
-        currentSpool.spool_id[uidLength * 2] = '\0';
-        memcpy(currentSpool.uid, uid, uidLength);
-        currentSpool.uid_length = uidLength;
-        currentSpool.present = true;
-        currentSpool.tag_data_valid = false;
-        currentSpool.blank_tag_present = true;
-        currentSpool.kind = TagKind::BlankTag;
-        lastOpenTag3DValid_ = false;
-        openTag3DMimeSeen_ = false;
+        scan_->currentSpool.spool_id[uidLength * 2] = '\0';
+        memcpy(scan_->currentSpool.uid, uid, uidLength);
+        scan_->currentSpool.uid_length = uidLength;
+        scan_->currentSpool.present = true;
+        scan_->currentSpool.tag_data_valid = false;
+        scan_->currentSpool.blank_tag_present = true;
+        scan_->currentSpool.kind = TagKind::BlankTag;
+        scan_->lastOpenTag3DValid_ = false;
+        scan_->openTag3DMimeSeen_ = false;
         clearOpenTag3DRawBaselineLocked();
-        memcpy(lastSeenUid, uid, uidLength);
-        lastSeenUidLength = uidLength;
-        lastSeenValid = true;
-        lastSeenMs = millis();
+        memcpy(scan_->lastSeenUid, uid, uidLength);
+        scan_->lastSeenUidLength = uidLength;
+        scan_->lastSeenValid = true;
+        scan_->lastSeenMs = millis();
         xSemaphoreGive(tagMutex);
         sendBlankTagMessage();
     }
@@ -736,22 +736,22 @@ void NFCManager::handleNewTag(uint8_t* uid, uint8_t uidLength) {
 void NFCManager::handleTagAbsent() {
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
 
-    if (lastSeenValid) {  // only send removal if we had a tag
+    if (scan_->lastSeenValid) {  // only send removal if we had a tag
         Serial.println("NFCManager: Tag removed");
-        LogBuffer::getInstance().logPrintf("Tag removed: %s\n", currentSpool.spool_id);
+        LogBuffer::getInstance().logPrintf("Tag removed: %s\n", scan_->currentSpool.spool_id);
         sendTagRemovedMessage();
     }
-    currentSpool.present = false;
-    currentSpool.blank_tag_present = false;
-    currentSpool.variant = NtagVariant::Unknown;  // don't let the removed tag's identity
-    currentSpool.cc_user_end = 0;                 // answer size checks for the next one
-    lastSeenValid = false;
-    lastTigerTagValid_ = false;
-    lastOpenTag3DValid_ = false;
-    openTag3DMimeSeen_ = false;
+    scan_->currentSpool.present = false;
+    scan_->currentSpool.blank_tag_present = false;
+    scan_->currentSpool.variant = NtagVariant::Unknown;  // don't let the removed tag's identity
+    scan_->currentSpool.cc_user_end = 0;                 // answer size checks for the next one
+    scan_->lastSeenValid = false;
+    scan_->lastTigerTagValid_ = false;
+    scan_->lastOpenTag3DValid_ = false;
+    scan_->openTag3DMimeSeen_ = false;
     clearOpenTag3DRawBaselineLocked();
-    suppressReDetection_ = false;       // allow fresh detection on next tag
-    suppressReDetectionUid_[0] = '\0';
+    scan_->suppressReDetection_ = false;       // allow fresh detection on next tag
+    scan_->suppressReDetectionUid_[0] = '\0';
     clearSelectedUid();                 // no tag selected — bound writes fail closed
     xSemaphoreGive(tagMutex);
 }
@@ -786,9 +786,9 @@ void NFCManager::scanLoop() {
     }
 #endif
 
-    connection_->reset();
-    connection_->setupRF();
-    connection_->logDiagnostics();
+    scan_->connection_->reset();
+    scan_->connection_->setupRF();
+    scan_->connection_->logDiagnostics();
 
     while (true) {
 #ifndef NATIVE_TEST
@@ -800,7 +800,7 @@ void NFCManager::scanLoop() {
         // can take exclusive ownership of the reader without a mid-transaction
         // suspend. We keep feeding the watchdog while idle.
         if (diagPauseRequested_) {
-            connection_->endTagSession();
+            scan_->connection_->endTagSession();
             scanPaused_ = true;
             while (diagPauseRequested_) {
 #ifndef NATIVE_TEST
@@ -821,15 +821,15 @@ void NFCManager::scanLoop() {
         }
 
         SCAN_PHASE(3);
-        if (connection_->detectTag(uid, &uidLength)) {
-            absentMisses_ = 0;
-            if (!lastSeenValid || memcmp(uid, lastSeenUid, uidLength) != 0) {
+        if (scan_->connection_->detectTag(uid, &uidLength)) {
+            scan_->absentMisses_ = 0;
+            if (!scan_->lastSeenValid || memcmp(uid, scan_->lastSeenUid, uidLength) != 0) {
                 char uidHex[17]; uidHex[0] = '\0';
                 for (uint8_t i = 0; i < uidLength; i++) snprintf(uidHex + i*2, 3, "%02X", uid[i]);
                 Serial.printf("NFCManager: Tag detected! UID=%s\n", uidHex);
                 LogBuffer::getInstance().logPrintf("Tag detected: UID=%s\n", uidHex);
             }
-            connection_->setCurrentUid(uid, uidLength);
+            scan_->connection_->setCurrentUid(uid, uidLength);
             // Bind pending writes to the tag we just selected, not to whatever
             // currentSpool still describes — the cooldown dedup below can skip
             // handleNewTag() and leave that stale (#276).
@@ -842,18 +842,18 @@ void NFCManager::scanLoop() {
             }
             SCAN_PHASE(6);
             processWriteQueue();
-        } else if (!lastSeenValid) {
+        } else if (!scan_->lastSeenValid) {
             // Nothing was present — no debounce needed, keep state cleared
             SCAN_PHASE(7);
             handleTagAbsent();
-        } else if (++absentMisses_ >= TAG_ABSENT_MISS_THRESHOLD) {
+        } else if (++scan_->absentMisses_ >= TAG_ABSENT_MISS_THRESHOLD) {
             SCAN_PHASE(8);
             // Debounce removal: single failed reads happen with stationary tags
             // (RF hiccups, marginal coupling). Only declare the tag gone after
             // several consecutive misses, or present/removed flaps every few
             // seconds and every subscriber (MQTT, HA, displays) flaps with it.
             handleTagAbsent();
-            absentMisses_ = 0;
+            scan_->absentMisses_ = 0;
         }
 
         SCAN_PHASE(9);
@@ -863,7 +863,7 @@ void NFCManager::scanLoop() {
 
 void NFCManager::attemptRecovery() {
     Serial.println("NFCManager: WATCHDOG - attempting hardware recovery");
-    if (connection_->hardwareReset()) {
+    if (scan_->connection_->hardwareReset()) {
         Serial.println("NFCManager: Hardware reset succeeded");
     } else {
         Serial.println("NFCManager: Hardware reset failed");
@@ -877,7 +877,7 @@ bool NFCManager::readAndParseTag(uint8_t* uid, uint8_t uid_length) {
 
     // OpenPrintTag uses ISO15693 (NFC-V) tags, designed for ICODE SLIX2 320B
     Serial.println("NFCManager: Reading tag data...");
-    opt_nfc_hal_t* hal = connection_->getHal();
+    opt_nfc_hal_t* hal = scan_->connection_->getHal();
     opt_error_t err = opt_read_from_nfc(&localTag, hal, 0, 78);
     if (err != OPT_OK) {
         Serial.printf("NFCManager: Failed to read tag data: %s\n", opt_error_str(err));
@@ -897,33 +897,33 @@ bool NFCManager::readAndParseTag(uint8_t* uid, uint8_t uid_length) {
         return false;
     }
 
-    currentSpool.tag_data = localTag;
+    scan_->currentSpool.tag_data = localTag;
 
     // Store UID as hex string
     for (uint8_t i = 0; i < uid_length && i < 8; i++) {
-        sprintf(currentSpool.spool_id + (i * 2), "%02X", uid[i]);
+        sprintf(scan_->currentSpool.spool_id + (i * 2), "%02X", uid[i]);
     }
-    currentSpool.spool_id[uid_length * 2] = '\0';
+    scan_->currentSpool.spool_id[uid_length * 2] = '\0';
 
-    memcpy(currentSpool.uid, uid, uid_length);
-    currentSpool.uid_length = uid_length;
+    memcpy(scan_->currentSpool.uid, uid, uid_length);
+    scan_->currentSpool.uid_length = uid_length;
 
-    currentSpool.present = true;
-    currentSpool.tag_data_valid = true;
-    currentSpool.variant = NtagVariant::Unknown;  // ISO15693 — no NTAG identity here
-    currentSpool.cc_user_end = 0;
+    scan_->currentSpool.present = true;
+    scan_->currentSpool.tag_data_valid = true;
+    scan_->currentSpool.variant = NtagVariant::Unknown;  // ISO15693 — no NTAG identity here
+    scan_->currentSpool.cc_user_end = 0;
 
     addToRecentSpoolsLocked();
 
-    Serial.printf("NFCManager: Parsed spool %s\n", currentSpool.spool_id);
+    Serial.printf("NFCManager: Parsed spool %s\n", scan_->currentSpool.spool_id);
 
     sendOpenPrintTagMessage();
 
     // Update dedup state
-    memcpy(lastSeenUid, uid, uid_length);
-    lastSeenUidLength = uid_length;
-    lastSeenValid = true;
-    lastSeenMs = millis();
+    memcpy(scan_->lastSeenUid, uid, uid_length);
+    scan_->lastSeenUidLength = uid_length;
+    scan_->lastSeenValid = true;
+    scan_->lastSeenMs = millis();
 
     xSemaphoreGive(tagMutex);
 
@@ -995,7 +995,7 @@ bool NFCManager::formatNewSpool() {
     }
 
     Serial.println("NFCManager: Writing to NFC tag...");
-    opt_nfc_hal_t* hal = connection_->getHal();
+    opt_nfc_hal_t* hal = scan_->connection_->getHal();
     err = opt_write_to_nfc(&localTag, hal);
     if (err != OPT_OK) {
         Serial.printf("NFCManager: Failed to write formatted tag: %s\n", opt_error_str(err));
@@ -1017,15 +1017,15 @@ bool NFCManager::formatNewSpool() {
                     Serial.println("NFCManager: Could not acquire tagMutex after format verify");
                     return false;
                 }
-                currentSpool.tag_data = localTag;
-                currentSpool.tag_data_valid = true;
-                currentSpool.blank_tag_present = false;
-                currentSpool.kind = TagKind::OpenPrintTag;
+                scan_->currentSpool.tag_data = localTag;
+                scan_->currentSpool.tag_data_valid = true;
+                scan_->currentSpool.blank_tag_present = false;
+                scan_->currentSpool.kind = TagKind::OpenPrintTag;
                 addToRecentSpoolsLocked();
 
                 // Check if write queue is empty (no batched writes pending)
                 NFCWriteRequest dummyReq;
-                bool queueEmpty = (writeQueue == nullptr || xQueuePeek(writeQueue, &dummyReq, 0) != pdTRUE);
+                bool queueEmpty = (scan_->writeQueue == nullptr || xQueuePeek(scan_->writeQueue, &dummyReq, 0) != pdTRUE);
 
                 if (queueEmpty) {
                     // No batched writes - send SpoolDetected immediately
@@ -1033,9 +1033,9 @@ bool NFCManager::formatNewSpool() {
                     Serial.println("NFCManager: formatNewSpool() complete - verified (queue empty, sent SpoolDetected)");
                 } else {
                     // Batched writes pending - set suppression flag
-                    suppressReDetection_ = true;
-                    strncpy(suppressReDetectionUid_, currentSpool.spool_id, sizeof(suppressReDetectionUid_) - 1);
-                    suppressReDetectionUid_[sizeof(suppressReDetectionUid_) - 1] = '\0';
+                    scan_->suppressReDetection_ = true;
+                    strncpy(scan_->suppressReDetectionUid_, scan_->currentSpool.spool_id, sizeof(scan_->suppressReDetectionUid_) - 1);
+                    scan_->suppressReDetectionUid_[sizeof(scan_->suppressReDetectionUid_) - 1] = '\0';
                     Serial.println("NFCManager: formatNewSpool() complete - verified (suppressing re-read for batched writes)");
                 }
 
@@ -1061,15 +1061,15 @@ bool NFCManager::formatNewSpool() {
         Serial.println("NFCManager: Could not acquire tagMutex after format fallback");
         return false;
     }
-    currentSpool.tag_data = localTag;
-    currentSpool.tag_data_valid = true;
-    currentSpool.blank_tag_present = false;
-    currentSpool.kind = TagKind::OpenPrintTag;
+    scan_->currentSpool.tag_data = localTag;
+    scan_->currentSpool.tag_data_valid = true;
+    scan_->currentSpool.blank_tag_present = false;
+    scan_->currentSpool.kind = TagKind::OpenPrintTag;
     addToRecentSpoolsLocked();
 
     // Check if write queue is empty (no batched writes pending)
     NFCWriteRequest dummyReq2;
-    bool queueEmpty = (writeQueue == nullptr || xQueuePeek(writeQueue, &dummyReq2, 0) != pdTRUE);
+    bool queueEmpty = (scan_->writeQueue == nullptr || xQueuePeek(scan_->writeQueue, &dummyReq2, 0) != pdTRUE);
 
     if (queueEmpty) {
         // No batched writes - send SpoolDetected immediately
@@ -1077,9 +1077,9 @@ bool NFCManager::formatNewSpool() {
         Serial.println("NFCManager: formatNewSpool() complete - unverified (queue empty, sent SpoolDetected)");
     } else {
         // Batched writes pending - set suppression flag
-        suppressReDetection_ = true;
-        strncpy(suppressReDetectionUid_, currentSpool.spool_id, sizeof(suppressReDetectionUid_) - 1);
-        suppressReDetectionUid_[sizeof(suppressReDetectionUid_) - 1] = '\0';
+        scan_->suppressReDetection_ = true;
+        strncpy(scan_->suppressReDetectionUid_, scan_->currentSpool.spool_id, sizeof(scan_->suppressReDetectionUid_) - 1);
+        scan_->suppressReDetectionUid_[sizeof(scan_->suppressReDetectionUid_) - 1] = '\0';
         Serial.println("NFCManager: formatNewSpool() complete - unverified (suppressing re-read for batched writes)");
     }
 
@@ -1088,7 +1088,7 @@ bool NFCManager::formatNewSpool() {
 }
 
 void NFCManager::sendOpenPrintTagMessage(bool suppress_spoolman_sync) {
-    if (!currentSpool.tag_data_valid) {
+    if (!scan_->currentSpool.tag_data_valid) {
         return;
     }
 
@@ -1099,13 +1099,13 @@ void NFCManager::sendOpenPrintTagMessage(bool suppress_spoolman_sync) {
     msg.type = AppMessageType::SPOOL_DETECTED;
 
     // Copy spool ID
-    strncpy(msg.payload.spoolDetected.spool_id, currentSpool.spool_id,
+    strncpy(msg.payload.spoolDetected.spool_id, scan_->currentSpool.spool_id,
             sizeof(msg.payload.spoolDetected.spool_id) - 1);
     msg.payload.spoolDetected.spool_id[sizeof(msg.payload.spoolDetected.spool_id) - 1] = '\0';
 
     // Get material type
     uint8_t material_type = 0;
-    if (opt_get_material_type(&currentSpool.tag_data, &material_type) == OPT_OK) {
+    if (opt_get_material_type(&scan_->currentSpool.tag_data, &material_type) == OPT_OK) {
         msg.payload.spoolDetected.material_type = material_type;
     } else {
         msg.payload.spoolDetected.material_type = 0;
@@ -1114,12 +1114,12 @@ void NFCManager::sendOpenPrintTagMessage(bool suppress_spoolman_sync) {
     // Calculate remaining weight in kg
     float full_weight = 0.0f;
     float consumed = 0.0f;
-    opt_get_actual_full_weight(&currentSpool.tag_data, &full_weight);
-    opt_get_consumed_weight(&currentSpool.tag_data, &consumed);
+    opt_get_actual_full_weight(&scan_->currentSpool.tag_data, &full_weight);
+    opt_get_consumed_weight(&scan_->currentSpool.tag_data, &consumed);
     msg.payload.spoolDetected.kg_remaining = (full_weight - consumed) / 1000.0f;
 
     // Get primary color
-    if (opt_get_primary_color(&currentSpool.tag_data, msg.payload.spoolDetected.primary_color) != OPT_OK) {
+    if (opt_get_primary_color(&scan_->currentSpool.tag_data, msg.payload.spoolDetected.primary_color) != OPT_OK) {
         memset(msg.payload.spoolDetected.primary_color, 0, 4);
         msg.payload.spoolDetected.has_color = false;
     } else {
@@ -1127,12 +1127,12 @@ void NFCManager::sendOpenPrintTagMessage(bool suppress_spoolman_sync) {
     }
 
     // Get density (use 0 to signal "not available" to caller)
-    if (opt_get_density(&currentSpool.tag_data, &msg.payload.spoolDetected.density) != OPT_OK) {
+    if (opt_get_density(&scan_->currentSpool.tag_data, &msg.payload.spoolDetected.density) != OPT_OK) {
         msg.payload.spoolDetected.density = 0.0f;
     }
 
     // Get filament diameter
-    if (opt_get_filament_diameter(&currentSpool.tag_data, &msg.payload.spoolDetected.diameter) != OPT_OK) {
+    if (opt_get_filament_diameter(&scan_->currentSpool.tag_data, &msg.payload.spoolDetected.diameter) != OPT_OK) {
         msg.payload.spoolDetected.diameter = 0.0f;
     }
 
@@ -1140,22 +1140,22 @@ void NFCManager::sendOpenPrintTagMessage(bool suppress_spoolman_sync) {
     msg.payload.spoolDetected.initial_weight_g = full_weight;
 
     // Get manufacturer/brand name
-    if (opt_get_brand_name(&currentSpool.tag_data, msg.payload.spoolDetected.manufacturer,
+    if (opt_get_brand_name(&scan_->currentSpool.tag_data, msg.payload.spoolDetected.manufacturer,
                            sizeof(msg.payload.spoolDetected.manufacturer)) != OPT_OK) {
         msg.payload.spoolDetected.manufacturer[0] = '\0';
     }
 
     // Get Spoolman ID from tag (if present)
     int32_t spoolman_id = -1;
-    opt_get_gp_spoolman_id(&currentSpool.tag_data, &spoolman_id);
+    opt_get_gp_spoolman_id(&scan_->currentSpool.tag_data, &spoolman_id);
     msg.payload.spoolDetected.spoolman_id = spoolman_id;
 
     // Get temperatures
     int16_t t = 0;
-    msg.payload.spoolDetected.min_print_temp = (opt_get_min_print_temp(&currentSpool.tag_data, &t) == OPT_OK) ? t : 0;
-    msg.payload.spoolDetected.max_print_temp = (opt_get_max_print_temp(&currentSpool.tag_data, &t) == OPT_OK) ? t : 0;
-    msg.payload.spoolDetected.min_bed_temp = (opt_get_min_bed_temp(&currentSpool.tag_data, &t) == OPT_OK) ? t : 0;
-    msg.payload.spoolDetected.max_bed_temp = (opt_get_max_bed_temp(&currentSpool.tag_data, &t) == OPT_OK) ? t : 0;
+    msg.payload.spoolDetected.min_print_temp = (opt_get_min_print_temp(&scan_->currentSpool.tag_data, &t) == OPT_OK) ? t : 0;
+    msg.payload.spoolDetected.max_print_temp = (opt_get_max_print_temp(&scan_->currentSpool.tag_data, &t) == OPT_OK) ? t : 0;
+    msg.payload.spoolDetected.min_bed_temp = (opt_get_min_bed_temp(&scan_->currentSpool.tag_data, &t) == OPT_OK) ? t : 0;
+    msg.payload.spoolDetected.max_bed_temp = (opt_get_max_bed_temp(&scan_->currentSpool.tag_data, &t) == OPT_OK) ? t : 0;
 
     // OpenPrintTag doesn't have aspect or dry fields
     msg.payload.spoolDetected.aspect[0] = '\0';
@@ -1167,7 +1167,7 @@ void NFCManager::sendOpenPrintTagMessage(bool suppress_spoolman_sync) {
     msg.payload.spoolDetected.suppress_spoolman_sync = suppress_spoolman_sync ? 1 : 0;
 
     // Get material name
-    if (opt_get_material_name(&currentSpool.tag_data, msg.payload.spoolDetected.material_name,
+    if (opt_get_material_name(&scan_->currentSpool.tag_data, msg.payload.spoolDetected.material_name,
                                sizeof(msg.payload.spoolDetected.material_name)) != OPT_OK) {
         // Use material type abbreviation as fallback
         const char* abbrev = opt_material_type_str((opt_material_type_t)material_type);
@@ -1205,14 +1205,14 @@ void NFCManager::sendOpenPrintTagMessage(bool suppress_spoolman_sync) {
 }
 
 void NFCManager::sendBambuDetectedMessage() {
-    if (!lastBambuTagValid_) return;
+    if (!scan_->lastBambuTagValid_) return;
 
-    const BambuTagData& bt = lastBambuTag_;
+    const BambuTagData& bt = scan_->lastBambuTag_;
     AppMessage msg;
     msg.type = AppMessageType::SPOOL_DETECTED;
     memset(&msg.payload.spoolDetected, 0, sizeof(msg.payload.spoolDetected));
 
-    strncpy(msg.payload.spoolDetected.spool_id, currentSpool.spool_id,
+    strncpy(msg.payload.spoolDetected.spool_id, scan_->currentSpool.spool_id,
             sizeof(msg.payload.spoolDetected.spool_id) - 1);
 
     msg.payload.spoolDetected.material_type = materialTypeFromString(bt.filament_type);
@@ -1252,7 +1252,7 @@ void NFCManager::sendBambuDetectedMessage() {
 void NFCManager::sendBlankTagMessage() {
     AppMessage msg;
     msg.type = AppMessageType::BLANK_TAG_DETECTED;
-    strncpy(msg.payload.blankTag.spool_id, currentSpool.spool_id,
+    strncpy(msg.payload.blankTag.spool_id, scan_->currentSpool.spool_id,
             sizeof(msg.payload.blankTag.spool_id) - 1);
     msg.payload.blankTag.spool_id[sizeof(msg.payload.blankTag.spool_id) - 1] = '\0';
 
@@ -1263,7 +1263,7 @@ void NFCManager::sendGenericTagMessage() {
     AppMessage msg;
     memset(&msg, 0, sizeof(msg));
     msg.type = AppMessageType::GENERIC_TAG_DETECTED;
-    strncpy(msg.payload.genericTag.spool_id, currentSpool.spool_id,
+    strncpy(msg.payload.genericTag.spool_id, scan_->currentSpool.spool_id,
             sizeof(msg.payload.genericTag.spool_id) - 1);
     msg.payload.genericTag.spool_id[sizeof(msg.payload.genericTag.spool_id) - 1] = '\0';
     ApplicationManager::getInstance().sendMessage(msg);
@@ -1276,7 +1276,7 @@ void NFCManager::sendTigerTagMessage(const TigerTagData& tt) {
 
     auto& s = msg.payload.spoolDetected;
 
-    strncpy(s.spool_id, currentSpool.spool_id, sizeof(s.spool_id) - 1);
+    strncpy(s.spool_id, scan_->currentSpool.spool_id, sizeof(s.spool_id) - 1);
     strncpy(s.manufacturer, tt.brand_name, sizeof(s.manufacturer) - 1);
     strncpy(s.material_name, tt.material_name, sizeof(s.material_name) - 1);
 
@@ -1359,7 +1359,7 @@ void NFCManager::sendOpenTag3DMessage(const opentag3d_t& ot3d) {
 
     auto& s = msg.payload.spoolDetected;
 
-    strncpy(s.spool_id, currentSpool.spool_id, sizeof(s.spool_id) - 1);
+    strncpy(s.spool_id, scan_->currentSpool.spool_id, sizeof(s.spool_id) - 1);
     strncpy(s.manufacturer, ot3d.manufacturer, sizeof(s.manufacturer) - 1);
 
     // Build descriptive material name: "Color Name Material" (e.g. "Blood Red PLA") or just "PLA"
@@ -1539,7 +1539,7 @@ TagScanResult NFCManager::classifyTag(const uint8_t* uid, uint8_t uid_length) {
         result.kind = TagKind::BlankTag;
     } else {
         result.protocol = TagProtocol::ISO14443A;
-        uint8_t sak = connection_->getLastSAK();
+        uint8_t sak = scan_->connection_->getLastSAK();
         if (sak == 0x08 || sak == 0x18) {
             result.kind = TagKind::BambuTag;
             Serial.printf("NFCManager: MIFARE Classic detected (SAK=0x%02X) — treating as Bambu tag\n", sak);
@@ -1547,7 +1547,7 @@ TagScanResult NFCManager::classifyTag(const uint8_t* uid, uint8_t uid_length) {
             result.kind = TagKind::GenericUidTag;
             // GET_VERSION identifies exact NTAG model — used for write capacity checks
             uint8_t version[8];
-            if (connection_->ntagGetVersion(version)) {
+            if (scan_->connection_->ntagGetVersion(version)) {
                 result.variant = mapStorageByte(version[6]);
                 Serial.printf("NFCManager: %s detected (%d pages)\n",
                     ntagVariantName(result.variant), ntagUsablePages(result.variant));
@@ -1559,7 +1559,7 @@ TagScanResult NFCManager::classifyTag(const uint8_t* uid, uint8_t uid_length) {
             // independently. Trust it exactly — never pad past the die end.
             if (result.variant == NtagVariant::Unknown) {
                 uint8_t ccBuf[4] = {0};
-                if (connection_->readISO14443Pages(3, 1, ccBuf, sizeof(ccBuf), true) >= 4) {  // keepSession — don't tear down the RF session the data read needs next
+                if (scan_->connection_->readISO14443Pages(3, 1, ccBuf, sizeof(ccBuf), true) >= 4) {  // keepSession — don't tear down the RF session the data read needs next
                     result.cc_user_end = ccUserMemoryEnd(ccBuf);
                 }
                 if (result.cc_user_end > 0) {
@@ -1585,20 +1585,20 @@ void NFCManager::sendTagRemovedMessage() {
     AppMessage msg;
     memset(&msg, 0, sizeof(msg));
     msg.type = AppMessageType::TAG_REMOVED;
-    strncpy(msg.payload.tagRemoved.spool_id, currentSpool.spool_id,
+    strncpy(msg.payload.tagRemoved.spool_id, scan_->currentSpool.spool_id,
             sizeof(msg.payload.tagRemoved.spool_id) - 1);
     msg.payload.tagRemoved.spool_id[sizeof(msg.payload.tagRemoved.spool_id) - 1] = '\0';
     msg.payload.tagRemoved.last_remaining_kg = 0.0f;
     msg.payload.tagRemoved.spoolman_id = -1;
 
-    if (currentSpool.tag_data_valid) {
+    if (scan_->currentSpool.tag_data_valid) {
         float full_weight = 0.0f, consumed = 0.0f;
-        opt_get_actual_full_weight(&currentSpool.tag_data, &full_weight);
-        opt_get_consumed_weight(&currentSpool.tag_data, &consumed);
+        opt_get_actual_full_weight(&scan_->currentSpool.tag_data, &full_weight);
+        opt_get_consumed_weight(&scan_->currentSpool.tag_data, &consumed);
         msg.payload.tagRemoved.last_remaining_kg = (full_weight - consumed) / 1000.0f;
 
         int32_t smId = -1;
-        opt_get_gp_spoolman_id(&currentSpool.tag_data, &smId);
+        opt_get_gp_spoolman_id(&scan_->currentSpool.tag_data, &smId);
         msg.payload.tagRemoved.spoolman_id = smId;
     }
 
@@ -1733,7 +1733,7 @@ bool NFCManager::writeSpoolmanDataToTag(int32_t spoolman_id, const char* expecte
 }
 
 bool NFCManager::enqueueWrite(const NFCWriteRequest& req) {
-    if (writeQueue == nullptr) {
+    if (lanes_[0].writeQueue == nullptr) {
         return false;
     }
 
@@ -1742,18 +1742,18 @@ bool NFCManager::enqueueWrite(const NFCWriteRequest& req) {
         return true;  // Already done, return success
     }
 
-    bool queued = xQueueSend(writeQueue, &req, pdMS_TO_TICKS(100)) == pdTRUE;
+    bool queued = xQueueSend(lanes_[0].writeQueue, &req, pdMS_TO_TICKS(100)) == pdTRUE;
 
     // If this is part of a batch (suppress_sync or FORMAT_NEW), set suppression flag
     if (queued && (req.suppress_sync || req.type == NFCWriteType::FORMAT_NEW)) {
-        suppressReDetection_ = true;
+        lanes_[0].suppressReDetection_ = true;
         if (req.expected_spool_id[0] != '\0') {
-            strncpy(suppressReDetectionUid_, req.expected_spool_id, sizeof(suppressReDetectionUid_) - 1);
-            suppressReDetectionUid_[sizeof(suppressReDetectionUid_) - 1] = '\0';
+            strncpy(lanes_[0].suppressReDetectionUid_, req.expected_spool_id, sizeof(lanes_[0].suppressReDetectionUid_) - 1);
+            lanes_[0].suppressReDetectionUid_[sizeof(lanes_[0].suppressReDetectionUid_) - 1] = '\0';
         }
         // Track if this batch has suppress_sync
         if (req.suppress_sync) {
-            batchHadSuppressSync_ = true;
+            lanes_[0].batchHadSuppressSync_ = true;
         }
     }
 
@@ -1761,7 +1761,7 @@ bool NFCManager::enqueueWrite(const NFCWriteRequest& req) {
 }
 
 void NFCManager::processWriteQueue() {
-    if (writeQueue == nullptr || !currentSpool.present) {
+    if (scan_->writeQueue == nullptr || !scan_->currentSpool.present) {
         return;
     }
 
@@ -1769,16 +1769,16 @@ void NFCManager::processWriteQueue() {
 
     // Process at most one write per call — remaining writes get handled in
     // subsequent scan cycles (50ms apart), keeping tag detection responsive.
-    while (xQueuePeek(writeQueue, &request, 0) == pdTRUE) {
+    while (xQueuePeek(scan_->writeQueue, &request, 0) == pdTRUE) {
         // Check if already completed — skip without counting as our one write
         if (isRequestCompleted(request.request_id)) {
-            xQueueReceive(writeQueue, &request, 0);
+            xQueueReceive(scan_->writeQueue, &request, 0);
             rawWriteSlot_.release(request.request_id);
             continue;
         }
 
         // Dequeue the request
-        xQueueReceive(writeQueue, &request, 0);
+        xQueueReceive(scan_->writeQueue, &request, 0);
 
         // executeWrite() manages its own mutex internally
         bool success = executeWrite(request);
@@ -1790,10 +1790,10 @@ void NFCManager::processWriteQueue() {
         float snapshotRemainingGrams = 0;
         bool snapshotValid = false;
         if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            strncpy(snapshotSpoolId, currentSpool.spool_id, sizeof(snapshotSpoolId));
+            strncpy(snapshotSpoolId, scan_->currentSpool.spool_id, sizeof(snapshotSpoolId));
             snapshotSpoolId[sizeof(snapshotSpoolId) - 1] = '\0';
-            if (currentSpool.tag_data_valid) {
-                opt_get_remaining_weight(&currentSpool.tag_data, &snapshotRemainingGrams);
+            if (scan_->currentSpool.tag_data_valid) {
+                opt_get_remaining_weight(&scan_->currentSpool.tag_data, &snapshotRemainingGrams);
                 snapshotValid = true;
             }
             xSemaphoreGive(tagMutex);
@@ -1837,14 +1837,14 @@ void NFCManager::processWriteQueue() {
 
     // Check if queue is now empty
     NFCWriteRequest peekReq;
-    if (xQueuePeek(writeQueue, &peekReq, 0) != pdTRUE) {
+    if (xQueuePeek(scan_->writeQueue, &peekReq, 0) != pdTRUE) {
         // Queue is empty - clear suppression flag
-        if (suppressReDetection_) {
-            bool hadSuppressSync = batchHadSuppressSync_;
+        if (scan_->suppressReDetection_) {
+            bool hadSuppressSync = scan_->batchHadSuppressSync_;
             Serial.printf("NFCManager: Write queue empty, clearing suppression and sending SpoolDetected (suppress_spoolman_sync=%d)\n", hadSuppressSync);
-            suppressReDetection_ = false;
-            suppressReDetectionUid_[0] = '\0';
-            batchHadSuppressSync_ = false;
+            scan_->suppressReDetection_ = false;
+            scan_->suppressReDetectionUid_[0] = '\0';
+            scan_->batchHadSuppressSync_ = false;
 
             // Send SpoolDetected under mutex — sendOpenPrintTagMessage reads currentSpool.tag_data
             if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1873,7 +1873,7 @@ bool NFCManager::writeRawTag(const NFCWriteRequest& request) {
 
     // Write all pages to NFC tag
     Serial.println("NFCManager: Writing raw data to NFC tag...");
-    opt_nfc_hal_t* hal = connection_->getHal();
+    opt_nfc_hal_t* hal = scan_->connection_->getHal();
     opt_error_t err = opt_write_to_nfc(&localTag, hal);
     if (err != OPT_OK) {
         Serial.printf("NFCManager: Failed to write raw tag: %s\n", opt_error_str(err));
@@ -1894,11 +1894,11 @@ bool NFCManager::writeRawTag(const NFCWriteRequest& request) {
                     Serial.println("NFCManager: Could not acquire tagMutex after raw write verify");
                     return false;
                 }
-                currentSpool.tag_data = localTag;
-                currentSpool.tag_data_valid = true;
-                currentSpool.blank_tag_present = false;
-                currentSpool.kind = TagKind::OpenPrintTag;
-                lastSeenValid = false;  // Force re-detection on next scan
+                scan_->currentSpool.tag_data = localTag;
+                scan_->currentSpool.tag_data_valid = true;
+                scan_->currentSpool.blank_tag_present = false;
+                scan_->currentSpool.kind = TagKind::OpenPrintTag;
+                scan_->lastSeenValid = false;  // Force re-detection on next scan
                 addToRecentSpoolsLocked();
                 sendOpenPrintTagMessage();
                 xSemaphoreGive(tagMutex);
@@ -1923,11 +1923,11 @@ bool NFCManager::writeRawTag(const NFCWriteRequest& request) {
         Serial.println("NFCManager: Could not acquire tagMutex after raw write fallback");
         return false;
     }
-    currentSpool.tag_data = localTag;
-    currentSpool.tag_data_valid = true;
-    currentSpool.blank_tag_present = false;
-    currentSpool.kind = TagKind::OpenPrintTag;
-    lastSeenValid = false;
+    scan_->currentSpool.tag_data = localTag;
+    scan_->currentSpool.tag_data_valid = true;
+    scan_->currentSpool.blank_tag_present = false;
+    scan_->currentSpool.kind = TagKind::OpenPrintTag;
+    scan_->lastSeenValid = false;
     addToRecentSpoolsLocked();
     sendOpenPrintTagMessage();
     xSemaphoreGive(tagMutex);
@@ -1989,12 +1989,12 @@ bool NFCManager::validateWriteUid(const char* expectedUid, const char* writeType
     // Compare against the tag selected on the reader this scan cycle, not
     // currentSpool.spool_id — the scan-cooldown dedup can leave the latter
     // describing the previous tag while a different one is selected (#276).
-    const bool ok = writeUidMatches(expectedUid, selectedUidHex_);
+    const bool ok = writeUidMatches(expectedUid, scan_->selectedUidHex_);
     xSemaphoreGive(tagMutex);
     if (!ok) {
         Serial.printf("NFCManager: %s rejected - UID mismatch (expected %s, selected %s)\n",
                       writeType, expectedUid,
-                      selectedUidHex_[0] ? selectedUidHex_ : "<none>");
+                      scan_->selectedUidHex_[0] ? scan_->selectedUidHex_ : "<none>");
         return false;
     }
     return true;
@@ -2002,7 +2002,7 @@ bool NFCManager::validateWriteUid(const char* expectedUid, const char* writeType
 
 void NFCManager::forceRescan() {
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        currentSpool.present = false;
+        scan_->currentSpool.present = false;
         xSemaphoreGive(tagMutex);
     }
 }
@@ -2017,13 +2017,13 @@ void NFCManager::forceRescan() {
 // historical page<64 ceiling now applies only when the CC is also absent or
 // invalid, so an honest clone gets its real capacity instead.
 bool NFCManager::checkWriteCapacity(uint8_t startPage, uint8_t pageCount, const char* writeType) {
-    uint16_t maxPages = effectiveUserMemoryEnd(currentSpool.variant, currentSpool.cc_user_end);
+    uint16_t maxPages = effectiveUserMemoryEnd(scan_->currentSpool.variant, scan_->currentSpool.cc_user_end);
     if (maxPages == 0) maxPages = 64;
     if (startPage + pageCount > maxPages) {
         Serial.printf("NFCManager: %s rejected — needs %d pages (start=%d), tag has %d (%s)\n",
-            writeType, pageCount, startPage, maxPages, ntagVariantName(currentSpool.variant));
+            writeType, pageCount, startPage, maxPages, ntagVariantName(scan_->currentSpool.variant));
         LogBuffer::getInstance().logPrintf("%s rejected: needs %d pages, tag has %d (%s)\n",
-            writeType, pageCount, maxPages, ntagVariantName(currentSpool.variant));
+            writeType, pageCount, maxPages, ntagVariantName(scan_->currentSpool.variant));
         return false;
     }
     return true;
@@ -2040,7 +2040,7 @@ bool NFCManager::verifyISO14443Readback(uint8_t startPage, uint8_t pageCount, co
         uint8_t chunkPages = pageCount - pagesDone;
         if (chunkPages > sizeof(readback) / 4) chunkPages = sizeof(readback) / 4;
         uint16_t chunkBytes = (uint16_t)chunkPages * 4;
-        uint16_t n = connection_->readISO14443Pages(startPage + pagesDone, chunkPages,
+        uint16_t n = scan_->connection_->readISO14443Pages(startPage + pagesDone, chunkPages,
                                                      readback, sizeof(readback), false);
         if (n < chunkBytes) {
             Serial.printf("NFCManager: verify read returned %u of %u bytes at page %u\n",
@@ -2065,7 +2065,7 @@ bool NFCManager::ndefVerifyAndFinish(const char* what, uint8_t pagesNeeded,
 
     Serial.printf("NFCManager: %s verify mismatch — rewrite retry\n", what);
     LogBuffer::getInstance().logPrintf("Write %s: verify mismatch, rewriting\n", what);
-    if (connection_->writeISO14443Pages(4, pagesNeeded, ndefBuf, ndefLen)
+    if (scan_->connection_->writeISO14443Pages(4, pagesNeeded, ndefBuf, ndefLen)
             && verifyISO14443Readback(4, pagesNeeded, ndefBuf)) {
         Serial.printf("NFCManager: %s succeeded (recovery rewrite, verified)\n", what);
         LogBuffer::getInstance().logPrintf("Write %s: OK (rewrite, verified)\n", what);
@@ -2090,7 +2090,7 @@ bool NFCManager::tigertagVerifyAndFinish(const NFCWriteRequest& request, const c
 
     Serial.println("NFCManager: WRITE_TIGERTAG verify mismatch — full rewrite retry");
     LogBuffer::getInstance().logPrintf("Write TigerTag: verify mismatch, rewriting\n");
-    if (connection_->writeISO14443Pages(4, 10, request.data.tigertag_data, 40)
+    if (scan_->connection_->writeISO14443Pages(4, 10, request.data.tigertag_data, 40)
             && verifyISO14443Readback(4, 10, request.data.tigertag_data)) {
         Serial.println("NFCManager: WRITE_TIGERTAG succeeded (recovery rewrite, verified)");
         LogBuffer::getInstance().logPrintf("Write TigerTag: OK (rewrite, verified)\n");
@@ -2111,12 +2111,12 @@ bool NFCManager::executeTigerTagWrite(const NFCWriteRequest& request) {
     // TigerTag has a fixed binary layout across pages 4–13, so byte offsets never shift
     // and page-granular partial writes are safe.
     uint8_t current[40];
-    uint16_t bytesRead = connection_->readISO14443Pages(4, 10, current, sizeof(current), true);
+    uint16_t bytesRead = scan_->connection_->readISO14443Pages(4, 10, current, sizeof(current), true);
     if (bytesRead < 40) {
         Serial.printf("NFCManager: WRITE_TIGERTAG pre-read returned %u bytes, falling back to full write\n",
                       bytesRead);
         LogBuffer::getInstance().logPrintf("Write TigerTag: pre-read failed, full write\n");
-        if (!connection_->writeISO14443Pages(4, 10, request.data.tigertag_data, 40)) {
+        if (!scan_->connection_->writeISO14443Pages(4, 10, request.data.tigertag_data, 40)) {
             Serial.println("NFCManager: WRITE_TIGERTAG failed");
             LogBuffer::getInstance().logPrintf("Write TigerTag: FAILED\n");
             return false;
@@ -2157,11 +2157,11 @@ bool NFCManager::executeTigerTagWrite(const NFCWriteRequest& request) {
     for (uint8_t r = 0; r < runCount; ++r) {
         const PageRun& run = runs[r];
         const uint8_t* data = request.data.tigertag_data + (run.startPage - 4) * 4;
-        if (!connection_->writeISO14443Pages(run.startPage, run.pageCount, data, run.pageCount * 4)) {
+        if (!scan_->connection_->writeISO14443Pages(run.startPage, run.pageCount, data, run.pageCount * 4)) {
             Serial.printf("NFCManager: WRITE_TIGERTAG run %u failed (page %u, %u pages), attempting full rewrite\n",
                           r, run.startPage, run.pageCount);
             LogBuffer::getInstance().logPrintf("Write TigerTag: run failed, full rewrite\n");
-            if (connection_->writeISO14443Pages(4, 10, request.data.tigertag_data, 40)) {
+            if (scan_->connection_->writeISO14443Pages(4, 10, request.data.tigertag_data, 40)) {
                 return tigertagVerifyAndFinish(request, "full rewrite");
             }
             Serial.println("NFCManager: WRITE_TIGERTAG full rewrite failed");
@@ -2187,12 +2187,12 @@ bool NFCManager::executeOpenTag3DWrite(const NFCWriteRequest& request) {
         return false;
     }
     openTag3DPatchState_ = OpenTag3DPatchState::InFlight;
-    mimeSeen = openTag3DMimeSeen_;
-    hasBaseline = openTag3DRawBaselineValid_ &&
-                  strcmp(openTag3DRawBaselineUid_, request.expected_spool_id) == 0;
+    mimeSeen = scan_->openTag3DMimeSeen_;
+    hasBaseline = scan_->openTag3DRawBaselineValid_ &&
+                  strcmp(scan_->openTag3DRawBaselineUid_, request.expected_spool_id) == 0;
     if (hasBaseline) {
-        payloadLen = openTag3DRawBaselineLen_;
-        memcpy(openTag3DPayloadScratch_, openTag3DRawBaseline_, payloadLen);
+        payloadLen = scan_->openTag3DRawBaselineLen_;
+        memcpy(openTag3DPayloadScratch_, scan_->openTag3DRawBaseline_, payloadLen);
     }
     xSemaphoreGive(tagMutex);
 
@@ -2248,10 +2248,10 @@ bool NFCManager::executeOpenTag3DWrite(const NFCWriteRequest& request) {
         // the cached image even on failure. Only a full rescan may re-arm it.
         if (xSemaphoreTake(tagMutex, portMAX_DELAY) == pdTRUE) {
             clearOpenTag3DRawBaselineLocked();
-            lastOpenTag3DValid_ = false;
+            scan_->lastOpenTag3DValid_ = false;
             xSemaphoreGive(tagMutex);
         }
-        if (!connection_->writeISO14443Pages(4, pagesNeeded, ndefScratch_, ndefLen)) {
+        if (!scan_->connection_->writeISO14443Pages(4, pagesNeeded, ndefScratch_, ndefLen)) {
             Serial.println("NFCManager: WRITE_OPENTAG3D failed");
             LogBuffer::getInstance().logPrintf("Write OpenTag3D: FAILED\n");
             return false;
@@ -2299,7 +2299,7 @@ bool NFCManager::executeOpenSpoolWrite(const NFCWriteRequest& request) {
     uint8_t pagesNeeded = (uint8_t)(ndefLen / 4);
     Serial.printf("NFCManager: WRITE_OPENSPOOL - writing %u bytes (%u pages)\n", ndefLen, pagesNeeded);
     if (!checkWriteCapacity(4, pagesNeeded, "WRITE_OPENSPOOL")) return false;
-    if (!connection_->writeISO14443Pages(4, pagesNeeded, ndefBuf, ndefLen)) {
+    if (!scan_->connection_->writeISO14443Pages(4, pagesNeeded, ndefBuf, ndefLen)) {
         Serial.println("NFCManager: WRITE_OPENSPOOL failed");
         LogBuffer::getInstance().logPrintf("Write OpenSpool: FAILED\n");
         return false;
@@ -2320,35 +2320,35 @@ bool NFCManager::executeAtomicWrite(const NFCWriteRequest& request) {
         Serial.println("NFCManager: WRITE_ATOMIC - could not acquire tagMutex");
         return false;
     }
-    if (!currentSpool.tag_data_valid) {
+    if (!scan_->currentSpool.tag_data_valid) {
         xSemaphoreGive(tagMutex);
         return false;
     }
     // Atomic writes rebuild the tag from currentSpool's CBOR, so the bound UID
     // must match both the selected tag and the tag that data came from (#276).
-    if (!fieldUpdateWriteAllowed(request.expected_spool_id, selectedUidHex_, currentSpool.spool_id)) {
+    if (!fieldUpdateWriteAllowed(request.expected_spool_id, scan_->selectedUidHex_, scan_->currentSpool.spool_id)) {
         Serial.printf("NFCManager: WRITE_ATOMIC rejected - UID mismatch (expected %s, selected %s, spool %s)\n",
             request.expected_spool_id,
-            selectedUidHex_[0] ? selectedUidHex_ : "<none>", currentSpool.spool_id);
+            scan_->selectedUidHex_[0] ? scan_->selectedUidHex_ : "<none>", scan_->currentSpool.spool_id);
         xSemaphoreGive(tagMutex);
         return false;
     }
 
-    uint8_t  cur_mat_type = 0;     opt_get_material_type(&currentSpool.tag_data, &cur_mat_type);
-    uint8_t  cur_color[4] = {255,255,255,255}; opt_get_primary_color(&currentSpool.tag_data, cur_color);
-    float    cur_full_wt = 1000.0f; opt_get_actual_full_weight(&currentSpool.tag_data, &cur_full_wt);
-    float    cur_consumed = 0.0f;   opt_get_consumed_weight(&currentSpool.tag_data, &cur_consumed);
-    char     cur_brand[33] = {0};   opt_get_brand_name(&currentSpool.tag_data, cur_brand, sizeof(cur_brand));
-    float    cur_density = 0.0f;    opt_get_density(&currentSpool.tag_data, &cur_density);
-    float    cur_diameter = 0.0f;   opt_get_filament_diameter(&currentSpool.tag_data, &cur_diameter);
-    char     cur_mat_name[33] = {0}; opt_get_material_name(&currentSpool.tag_data, cur_mat_name, sizeof(cur_mat_name));
-    int32_t  cur_sm_id = -1;        opt_get_gp_spoolman_id(&currentSpool.tag_data, &cur_sm_id);
+    uint8_t  cur_mat_type = 0;     opt_get_material_type(&scan_->currentSpool.tag_data, &cur_mat_type);
+    uint8_t  cur_color[4] = {255,255,255,255}; opt_get_primary_color(&scan_->currentSpool.tag_data, cur_color);
+    float    cur_full_wt = 1000.0f; opt_get_actual_full_weight(&scan_->currentSpool.tag_data, &cur_full_wt);
+    float    cur_consumed = 0.0f;   opt_get_consumed_weight(&scan_->currentSpool.tag_data, &cur_consumed);
+    char     cur_brand[33] = {0};   opt_get_brand_name(&scan_->currentSpool.tag_data, cur_brand, sizeof(cur_brand));
+    float    cur_density = 0.0f;    opt_get_density(&scan_->currentSpool.tag_data, &cur_density);
+    float    cur_diameter = 0.0f;   opt_get_filament_diameter(&scan_->currentSpool.tag_data, &cur_diameter);
+    char     cur_mat_name[33] = {0}; opt_get_material_name(&scan_->currentSpool.tag_data, cur_mat_name, sizeof(cur_mat_name));
+    int32_t  cur_sm_id = -1;        opt_get_gp_spoolman_id(&scan_->currentSpool.tag_data, &cur_sm_id);
     int16_t  cur_min_pt = 0, cur_max_pt = 0, cur_pre_t = 0, cur_min_bt = 0, cur_max_bt = 0;
-    opt_get_min_print_temp(&currentSpool.tag_data, &cur_min_pt);
-    opt_get_max_print_temp(&currentSpool.tag_data, &cur_max_pt);
-    opt_get_preheat_temp(&currentSpool.tag_data, &cur_pre_t);
-    opt_get_min_bed_temp(&currentSpool.tag_data, &cur_min_bt);
-    opt_get_max_bed_temp(&currentSpool.tag_data, &cur_max_bt);
+    opt_get_min_print_temp(&scan_->currentSpool.tag_data, &cur_min_pt);
+    opt_get_max_print_temp(&scan_->currentSpool.tag_data, &cur_max_pt);
+    opt_get_preheat_temp(&scan_->currentSpool.tag_data, &cur_pre_t);
+    opt_get_min_bed_temp(&scan_->currentSpool.tag_data, &cur_min_bt);
+    opt_get_max_bed_temp(&scan_->currentSpool.tag_data, &cur_max_bt);
     xSemaphoreGive(tagMutex);
 
     opt_init(&writeScratchTag_);
@@ -2395,7 +2395,7 @@ bool NFCManager::executeAtomicWrite(const NFCWriteRequest& request) {
     #undef ATOMIC_SET
 
     Serial.println("NFCManager: WRITE_ATOMIC writing to NFC...");
-    opt_nfc_hal_t* hal = connection_->getHal();
+    opt_nfc_hal_t* hal = scan_->connection_->getHal();
     err = opt_write_to_nfc(&writeScratchTag_, hal);
     if (err != OPT_OK) {
         Serial.printf("NFCManager: WRITE_ATOMIC NFC write failed: %s\n", opt_error_str(err));
@@ -2421,10 +2421,10 @@ bool NFCManager::executeAtomicWrite(const NFCWriteRequest& request) {
         Serial.println("NFCManager: WRITE_ATOMIC succeeded but commit lock failed");
         return false;
     }
-    currentSpool.tag_data = writeScratchTag_;
-    currentSpool.tag_data_valid = true;
-    currentSpool.blank_tag_present = false;
-    currentSpool.kind = TagKind::OpenPrintTag;
+    scan_->currentSpool.tag_data = writeScratchTag_;
+    scan_->currentSpool.tag_data_valid = true;
+    scan_->currentSpool.blank_tag_present = false;
+    scan_->currentSpool.kind = TagKind::OpenPrintTag;
     addToRecentSpoolsLocked();
     sendOpenPrintTagMessage();
     xSemaphoreGive(tagMutex);
@@ -2465,23 +2465,23 @@ bool NFCManager::executeWrite(const NFCWriteRequest& request) {
         return false;
     }
 
-    if (!currentSpool.tag_data_valid) {
+    if (!scan_->currentSpool.tag_data_valid) {
         xSemaphoreGive(tagMutex);
         return false;
     }
 
     // Field updates mutate currentSpool's CBOR in place, so the bound UID must
     // match both the selected tag and the tag that data came from (#276).
-    if (!fieldUpdateWriteAllowed(request.expected_spool_id, selectedUidHex_, currentSpool.spool_id)) {
+    if (!fieldUpdateWriteAllowed(request.expected_spool_id, scan_->selectedUidHex_, scan_->currentSpool.spool_id)) {
         Serial.printf("NFCManager: write rejected - UID mismatch (expected %s, selected %s, spool %s)\n",
             request.expected_spool_id,
-            selectedUidHex_[0] ? selectedUidHex_ : "<none>", currentSpool.spool_id);
+            scan_->selectedUidHex_[0] ? scan_->selectedUidHex_ : "<none>", scan_->currentSpool.spool_id);
         xSemaphoreGive(tagMutex);
         return false;
     }
 
     // Snapshot current tag into reusable scratch storage under mutex; do not mutate shared state until write succeeds.
-    writeScratchTag_ = currentSpool.tag_data;
+    writeScratchTag_ = scan_->currentSpool.tag_data;
     xSemaphoreGive(tagMutex);
 
     // Preflight update on a copy to detect overflow before touching shared state.
@@ -2497,7 +2497,7 @@ bool NFCManager::executeWrite(const NFCWriteRequest& request) {
     }
 
     // NFC I/O without mutex — only scan task touches the hardware
-    opt_nfc_hal_t* hal = connection_->getHal();
+    opt_nfc_hal_t* hal = scan_->connection_->getHal();
     const bool auxOnlyWrite = isAuxOnlyWrite(request.type);
     if (auxOnlyWrite) {
         err = opt_write_aux_region(&updatedTag, hal);
@@ -2528,11 +2528,11 @@ bool NFCManager::executeWrite(const NFCWriteRequest& request) {
                     Serial.println("NFCManager: executeWrite fallback succeeded but commit lock failed");
                     return false;
                 }
-                currentSpool.tag_data = updatedTag;
-                currentSpool.tag_data_valid = true;
-                currentSpool.blank_tag_present = false;
-                currentSpool.kind = TagKind::OpenPrintTag;
-                lastSeenValid = false;
+                scan_->currentSpool.tag_data = updatedTag;
+                scan_->currentSpool.tag_data_valid = true;
+                scan_->currentSpool.blank_tag_present = false;
+                scan_->currentSpool.kind = TagKind::OpenPrintTag;
+                scan_->lastSeenValid = false;
                 addToRecentSpoolsLocked();
                 sendOpenPrintTagMessage();
                 xSemaphoreGive(tagMutex);
@@ -2550,10 +2550,10 @@ bool NFCManager::executeWrite(const NFCWriteRequest& request) {
         return false;
     }
 
-    currentSpool.tag_data = updatedTag;
-    currentSpool.tag_data_valid = true;
-    currentSpool.blank_tag_present = false;
-    currentSpool.kind = TagKind::OpenPrintTag;
+    scan_->currentSpool.tag_data = updatedTag;
+    scan_->currentSpool.tag_data_valid = true;
+    scan_->currentSpool.blank_tag_present = false;
+    scan_->currentSpool.kind = TagKind::OpenPrintTag;
     xSemaphoreGive(tagMutex);
 
     switch (request.type) {
@@ -2618,7 +2618,7 @@ void NFCManager::sendSpoolUpdatedMessage(uint32_t request_id, NFCWriteType type,
     // never inferred from the write type.
     msg.payload.spoolUpdated.request_id = request_id;
 
-    strncpy(msg.payload.spoolUpdated.spool_id, currentSpool.spool_id,
+    strncpy(msg.payload.spoolUpdated.spool_id, scan_->currentSpool.spool_id,
             sizeof(msg.payload.spoolUpdated.spool_id) - 1);
     msg.payload.spoolUpdated.spool_id[sizeof(msg.payload.spoolUpdated.spool_id) - 1] = '\0';
 
@@ -2629,8 +2629,8 @@ void NFCManager::sendSpoolUpdatedMessage(uint32_t request_id, NFCWriteType type,
     // Get remaining weight from tag data under mutex to prevent torn reads
     float remaining_grams = 0;
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        if (currentSpool.tag_data_valid) {
-            opt_get_remaining_weight(&currentSpool.tag_data, &remaining_grams);
+        if (scan_->currentSpool.tag_data_valid) {
+            opt_get_remaining_weight(&scan_->currentSpool.tag_data, &remaining_grams);
         }
         xSemaphoreGive(tagMutex);
     }
@@ -2684,37 +2684,37 @@ bool NFCManager::isDuplicateSpool(const uint8_t* uid, uint8_t uid_length) {
     // Even if lastSeenValid is false (cleared by setupRF recovery), check if the
     // current spool UID matches — avoids re-processing the same tag as GenericUid
     // after a TigerTag or OpenPrintTag was already parsed successfully.
-    if (!lastSeenValid && currentSpool.present &&
-        uid_length == currentSpool.uid_length &&
-        memcmp(uid, currentSpool.uid, uid_length) == 0) {
+    if (!scan_->lastSeenValid && scan_->currentSpool.present &&
+        uid_length == scan_->currentSpool.uid_length &&
+        memcmp(uid, scan_->currentSpool.uid, uid_length) == 0) {
         return true;
     }
 
     // Cooldown: suppress re-reads within 3s where first 3 bytes match.
     // Catches PN5180 partial UID reads (e.g., 04A651FFFFFFFF) that happen
     // when the tag is re-detected after a brief communication glitch.
-    if (lastSeenUidLength > 0 && uid_length >= 3 && lastSeenUidLength >= 3 &&
-        (millis() - lastSeenMs) < SCAN_COOLDOWN_MS &&
-        memcmp(uid, lastSeenUid, 3) == 0) {
+    if (scan_->lastSeenUidLength > 0 && uid_length >= 3 && scan_->lastSeenUidLength >= 3 &&
+        (millis() - scan_->lastSeenMs) < SCAN_COOLDOWN_MS &&
+        memcmp(uid, scan_->lastSeenUid, 3) == 0) {
         return true;
     }
 
-    if (!lastSeenValid) {
+    if (!scan_->lastSeenValid) {
         return false;
     }
 
-    if (uid_length != lastSeenUidLength) {
+    if (uid_length != scan_->lastSeenUidLength) {
         return false;
     }
 
-    return memcmp(uid, lastSeenUid, uid_length) == 0;
+    return memcmp(uid, scan_->lastSeenUid, uid_length) == 0;
 }
 
 void NFCManager::requestCurrentSpool() {
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        lastSeenValid = false;
-        memset(lastSeenUid, 0, sizeof(lastSeenUid));
-        lastSeenUidLength = 0;
+        lanes_[0].lastSeenValid = false;
+        memset(lanes_[0].lastSeenUid, 0, sizeof(lanes_[0].lastSeenUid));
+        lanes_[0].lastSeenUidLength = 0;
         xSemaphoreGive(tagMutex);
     }
 }
@@ -2726,12 +2726,12 @@ void NFCManager::requestCurrentSpool() {
 // the race against getRecentSpools(), which reads the array under the mutex
 // while the tail of this function used to rewrite it unlocked.
 void NFCManager::addToRecentSpoolsLocked() {
-    if (!currentSpool.tag_data_valid) return;
+    if (!scan_->currentSpool.tag_data_valid) return;
 
     // Check if this spool already exists in recent list
     int existingIndex = -1;
     for (size_t i = 0; i < recentSpoolsCount; i++) {
-        if (strcmp(recentSpools[i].spool_id, currentSpool.spool_id) == 0) {
+        if (strcmp(recentSpools[i].spool_id, scan_->currentSpool.spool_id) == 0) {
             existingIndex = i;
             break;
         }
@@ -2740,18 +2740,18 @@ void NFCManager::addToRecentSpoolsLocked() {
     // Snapshot data under mutex
     RecentSpoolEntry newEntry;
     memset(&newEntry, 0, sizeof(newEntry));
-    strncpy(newEntry.spool_id, currentSpool.spool_id, sizeof(newEntry.spool_id) - 1);
+    strncpy(newEntry.spool_id, scan_->currentSpool.spool_id, sizeof(newEntry.spool_id) - 1);
 
-    opt_get_material_type(&currentSpool.tag_data, &newEntry.material_type);
-    opt_get_primary_color(&currentSpool.tag_data, newEntry.color);
+    opt_get_material_type(&scan_->currentSpool.tag_data, &newEntry.material_type);
+    opt_get_primary_color(&scan_->currentSpool.tag_data, newEntry.color);
 
-    if (opt_get_brand_name(&currentSpool.tag_data, newEntry.manufacturer, sizeof(newEntry.manufacturer)) != OPT_OK) {
+    if (opt_get_brand_name(&scan_->currentSpool.tag_data, newEntry.manufacturer, sizeof(newEntry.manufacturer)) != OPT_OK) {
         newEntry.manufacturer[0] = '\0';
     }
 
     float full_weight = 0.0f, consumed = 0.0f;
-    opt_get_actual_full_weight(&currentSpool.tag_data, &full_weight);
-    opt_get_consumed_weight(&currentSpool.tag_data, &consumed);
+    opt_get_actual_full_weight(&scan_->currentSpool.tag_data, &full_weight);
+    opt_get_consumed_weight(&scan_->currentSpool.tag_data, &consumed);
     newEntry.grams_remaining = (int)(full_weight - consumed);
 
     newEntry.last_seen = time(nullptr);
@@ -2759,7 +2759,7 @@ void NFCManager::addToRecentSpoolsLocked() {
     newEntry.synced_to_spoolman = false;
 
     int32_t smId = -1;
-    opt_get_gp_spoolman_id(&currentSpool.tag_data, &smId);
+    opt_get_gp_spoolman_id(&scan_->currentSpool.tag_data, &smId);
     newEntry.spoolman_id = smId;
 
     if (existingIndex >= 0) {
@@ -2787,24 +2787,24 @@ bool NFCManager::scanOnce() {
     uint8_t uidLength = 0;
     bool result = false;
 
-    connection_->reset();
-    connection_->setupRF();
+    scan_->connection_->reset();
+    scan_->connection_->setupRF();
 
-    if (connection_->detectTag(uid, &uidLength)) {
-        connection_->setCurrentUid(uid, uidLength);
+    if (scan_->connection_->detectTag(uid, &uidLength)) {
+        scan_->connection_->setCurrentUid(uid, uidLength);
         recordSelectedUid(uid, uidLength);
 
         // Check if this is the same spool or if re-detection is suppressed
         bool shouldSkipReRead = isDuplicateSpool(uid, uidLength);
 
-        if (suppressReDetection_) {
+        if (scan_->suppressReDetection_) {
             char uidHex[17];
             for (uint8_t i = 0; i < uidLength && i < 8; i++) {
                 sprintf(uidHex + (i * 2), "%02X", uid[i]);
             }
             uidHex[uidLength * 2] = '\0';
 
-            if (strcmp(uidHex, suppressReDetectionUid_) == 0) {
+            if (strcmp(uidHex, scan_->suppressReDetectionUid_) == 0) {
                 shouldSkipReRead = true;
             }
         }
@@ -2818,21 +2818,21 @@ bool NFCManager::scanOnce() {
 bool blankStateCaptured = false;
 if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     for (uint8_t i = 0; i < uidLength && i < 8; i++) {
-        sprintf(currentSpool.spool_id + (i * 2), "%02X", uid[i]);
+        sprintf(scan_->currentSpool.spool_id + (i * 2), "%02X", uid[i]);
     }
-    currentSpool.spool_id[uidLength * 2] = '\0';
-    memcpy(currentSpool.uid, uid, uidLength);
-    currentSpool.uid_length = uidLength;
-    currentSpool.present = true;
-    currentSpool.tag_data_valid = false;
-    currentSpool.blank_tag_present = true;
-    currentSpool.kind = TagKind::BlankTag;
-    currentSpool.variant = NtagVariant::Unknown;  // ISO15693 — a previous ISO14443 tag's
-    currentSpool.cc_user_end = 0;                 // identity must not leak into size gates
-    memcpy(lastSeenUid, uid, uidLength);
-    lastSeenUidLength = uidLength;
-    lastSeenValid = true;
-    lastSeenMs = millis();
+    scan_->currentSpool.spool_id[uidLength * 2] = '\0';
+    memcpy(scan_->currentSpool.uid, uid, uidLength);
+    scan_->currentSpool.uid_length = uidLength;
+    scan_->currentSpool.present = true;
+    scan_->currentSpool.tag_data_valid = false;
+    scan_->currentSpool.blank_tag_present = true;
+    scan_->currentSpool.kind = TagKind::BlankTag;
+    scan_->currentSpool.variant = NtagVariant::Unknown;  // ISO15693 — a previous ISO14443 tag's
+    scan_->currentSpool.cc_user_end = 0;                 // identity must not leak into size gates
+    memcpy(scan_->lastSeenUid, uid, uidLength);
+    scan_->lastSeenUidLength = uidLength;
+    scan_->lastSeenValid = true;
+    scan_->lastSeenMs = millis();
     blankStateCaptured = true;
     xSemaphoreGive(tagMutex);
 }
@@ -2845,17 +2845,17 @@ if (blankStateCaptured) {
         processWriteQueue();
     } else {
         if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            if (lastSeenValid) {
+            if (scan_->lastSeenValid) {
                 sendTagRemovedMessage();
             }
-            currentSpool.present = false;
-            currentSpool.blank_tag_present = false;
-            currentSpool.cc_user_end = 0;
-            lastSeenValid = false;
+            scan_->currentSpool.present = false;
+            scan_->currentSpool.blank_tag_present = false;
+            scan_->currentSpool.cc_user_end = 0;
+            scan_->lastSeenValid = false;
 
             // Clear suppression if tag removed
-            suppressReDetection_ = false;
-            suppressReDetectionUid_[0] = '\0';
+            scan_->suppressReDetection_ = false;
+            scan_->suppressReDetectionUid_[0] = '\0';
             clearSelectedUid();
 
             xSemaphoreGive(tagMutex);
@@ -2877,7 +2877,7 @@ size_t NFCManager::getRecentSpools(RecentSpoolEntry* entries, size_t maxEntries)
     for (size_t i = 0; i < recentSpoolsCount && count < maxEntries; i++) {
         if (recentSpools[i].valid) {
             // Skip the current spool if it matches
-            if (currentSpool.present && strcmp(recentSpools[i].spool_id, currentSpool.spool_id) == 0) {
+            if (lanes_[0].currentSpool.present && strcmp(recentSpools[i].spool_id, lanes_[0].currentSpool.spool_id) == 0) {
                 continue;
             }
             entries[count++] = recentSpools[i];
@@ -2908,8 +2908,8 @@ void NFCManager::updateRecentSpoolSyncStatus(const char* spool_id, bool synced) 
 }
 
 bool NFCManager::isWriteQueueEmpty() const {
-    if (!writeQueue) return true;
-    return uxQueueMessagesWaiting(writeQueue) == 0;
+    if (!lanes_[0].writeQueue) return true;
+    return uxQueueMessagesWaiting(lanes_[0].writeQueue) == 0;
 }
 
 bool NFCManager::readBambuTag(const uint8_t* uid, uint8_t uidLength, BambuTagData& out) {
@@ -2926,7 +2926,7 @@ bool NFCManager::readBambuTag(const uint8_t* uid, uint8_t uidLength, BambuTagDat
         bool failed = false;
 
         if (sector != lastAuthSector) {
-            if (!connection_->mifareAuthenticate(blockNo, 0x60, keys.blockKey(blockNo))) {
+            if (!scan_->connection_->mifareAuthenticate(blockNo, 0x60, keys.blockKey(blockNo))) {
                 Serial.printf("NFCManager: Bambu auth failed on block %d (sector %d)\n", blockNo, sector);
                 LogBuffer::getInstance().logPrintf("Bambu auth fail blk %d sec %d\n", blockNo, sector);
                 failed = true;
@@ -2936,7 +2936,7 @@ bool NFCManager::readBambuTag(const uint8_t* uid, uint8_t uidLength, BambuTagDat
         }
 
         if (!failed) {
-            if (!connection_->mifareClassicRead(blockNo, blocks[i])) {
+            if (!scan_->connection_->mifareClassicRead(blockNo, blocks[i])) {
                 Serial.printf("NFCManager: Bambu block read failed on block %d\n", blockNo);
                 memset(blocks[i], 0, 16);
                 failed = true;
