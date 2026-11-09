@@ -22,6 +22,10 @@ enum class NfcPinId : uint8_t { Rst = 0, Nss, Busy, Sck, Mosi, Miso, Count };
 // (PIN_STATUS_LED). Any other value is a user GPIO override. (#203)
 static constexpr uint8_t LED_PIN_DEFAULT = 0xFF;
 
+// Multi-reader ("lane") slots in ConfigUpdate. The per-board limit is
+// NFC_MAX_LANES (include/LanePins.h), which must fit in this.
+static constexpr uint8_t LANE_SLOTS = 8;
+
 struct ConfigUpdate {
     char wifi_ssid[64];
     char wifi_pass[64];
@@ -57,6 +61,11 @@ struct ConfigUpdate {
     uint8_t u1_auto_pick;     // stage mode: 1 = assign to the first lane that loads (default on)
     uint8_t led_pin;          // status LED GPIO override; LED_PIN_DEFAULT = board default (#203)
     uint8_t nfc_pins[6];      // NFC reader pin overrides (NfcPinId order); 0xFF = board default (#201)
+    // Multi-reader lanes: lane 1 is the reader on nfc_pins; lanes 2..lane_count
+    // add their own NSS/SS (and BUSY on the PN5180). 0xFF = board default.
+    uint8_t lane_count;               // 1 = single reader (default)
+    uint8_t lane_nss[LANE_SLOTS];     // index = lane - 1; [0] unused
+    uint8_t lane_busy[LANE_SLOTS];
 };
 
 class ConfigurationManager {
@@ -107,6 +116,20 @@ public:
     // board default from BoardPins.h. Consumers read these once at begin();
     // changes apply on the post-save reboot. (#201)
     uint8_t getNfcPin(NfcPinId id) const;
+
+    // Multi-reader lanes. getLaneCount() is 1 unless more lanes are
+    // configured and valid; lane pins are effective values (override or
+    // board default, -1 if the board has none). lane is 0-based; lane 0 is
+    // the reader on the regular NFC pins.
+    uint8_t getLaneCount() const;
+    uint8_t getMaxLanes() const;
+    int16_t getLaneNss(uint8_t lane) const;
+    int16_t getLaneBusy(uint8_t lane) const;
+    int16_t getLaneDefaultNss(uint8_t lane) const;
+    int16_t getLaneDefaultBusy(uint8_t lane) const;
+    // Check an update's lane settings against this board and the update's
+    // own NFC/LED/feature pins. On failure writes a user-facing reason.
+    bool validateLanes(const ConfigUpdate& update, char* err, size_t errLen) const;
 
     // Low-spool threshold (grams) — LED breathes when remaining weight is at or below this
     uint16_t getLowSpoolThreshold() const;
@@ -187,6 +210,13 @@ private:
                             LED_PIN_DEFAULT, LED_PIN_DEFAULT, LED_PIN_DEFAULT };
 
     bool _initialized = false;
+
+    // Multi-reader lanes (see getLaneCount)
+    uint8_t _laneCount = 1;
+    uint8_t _laneNss[LANE_SLOTS] = { LED_PIN_DEFAULT, LED_PIN_DEFAULT, LED_PIN_DEFAULT, LED_PIN_DEFAULT,
+                                     LED_PIN_DEFAULT, LED_PIN_DEFAULT, LED_PIN_DEFAULT, LED_PIN_DEFAULT };
+    uint8_t _laneBusy[LANE_SLOTS] = { LED_PIN_DEFAULT, LED_PIN_DEFAULT, LED_PIN_DEFAULT, LED_PIN_DEFAULT,
+                                      LED_PIN_DEFAULT, LED_PIN_DEFAULT, LED_PIN_DEFAULT, LED_PIN_DEFAULT };
 };
 
 #endif // CONFIGURATION_MANAGER_H

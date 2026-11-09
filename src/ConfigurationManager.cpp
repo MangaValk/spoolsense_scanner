@@ -2,6 +2,8 @@
 #include "UserConfig.h"
 #include "DeviceConfig.h"
 #include "BoardPins.h"
+#include "LanePins.h"
+#include "LaneConfig.h"
 #include <cstring>
 #include <Arduino.h>
 
@@ -52,6 +54,14 @@ static const int16_t NFC_PIN_DEFAULTS[6] = {
     PIN_PN5180_SCK, PIN_PN5180_MOSI, PIN_PN5180_MISO,
 };
 static const char* NFC_PIN_NAMES[6] = { "RST", "NSS", "BUSY", "SCK", "MOSI", "MISO" };
+// Multi-reader lanes: count plus per-lane NSS/BUSY overrides (byte arrays,
+// index = lane - 1, 0xFF = board default)
+static const char* NVS_KEY_LANE_COUNT    = "lane_count";
+static const char* NVS_KEY_LANE_NSS      = "lane_nss";
+static const char* NVS_KEY_LANE_BUSY     = "lane_busy";
+static_assert(NFC_MAX_LANES >= 1 && NFC_MAX_LANES <= LANE_SLOTS, "NFC_MAX_LANES must fit ConfigUpdate");
+static const int16_t LANE_DEFAULT_NSS[NFC_MAX_LANES]  = NFC_LANE_DEFAULT_NSS;
+static const int16_t LANE_DEFAULT_BUSY[NFC_MAX_LANES] = NFC_LANE_DEFAULT_BUSY;
 
 // Sanitize hostname: enforce mDNS naming constraints (lowercase alphanum + hyphens,
 // no leading/trailing hyphens) and reject empty strings to avoid boot-time errors.
@@ -287,6 +297,64 @@ static void sanitizeNfcPinSet(uint8_t pins[6], bool lcdOn, bool tftOn, bool keyp
         Serial.println("ConfigurationManager: reverting ALL NFC pin overrides to board defaults");
         for (int i = 0; i < 6; i++) pins[i] = LED_PIN_DEFAULT;
     }
+}
+
+// Lane pin capability on this board: boardPinUsable() plus, on the classic
+// ESP32, the input-only GPIO34-39, which are fine for a lane's BUSY line.
+static LaneConfig::PinCap lanePinCap(uint8_t pin) {
+#if !defined(BOARD_ESP32_S3) && !defined(BOARD_ESP32_C3) && !defined(BOARD_ESP32_C5) && \
+    !defined(BOARD_ESP32_C6) && !defined(BOARD_SEEED_XIAO_ESP32_C6)
+    if (pin >= 34 && pin <= 39) return LaneConfig::PinCap::InputOnly;
+#endif
+    return boardPinUsable(pin) ? LaneConfig::PinCap::InOut : LaneConfig::PinCap::Unusable;
+}
+
+// Validate lanes 2..laneCount against the effective NFC pins (lane 1 and the
+// shared bus), the status LED and the enabled features.
+static bool checkLanes(uint8_t laneCount, const uint8_t* nssOv, const uint8_t* busyOv,
+                       const uint8_t nfcPins[6], bool pn5180, bool lcdOn, bool tftOn,
+                       bool keypadOn, uint8_t effectiveLedPin, char* err, size_t errLen) {
+    if (laneCount == 1) {  // single reader: nothing beyond the regular NFC pins
+        if (err && errLen) err[0] = '\0';
+        return true;
+    }
+    int16_t nss[NFC_MAX_LANES];
+    int16_t busy[NFC_MAX_LANES];
+    for (uint8_t i = 0; i < NFC_MAX_LANES; i++) {
+        nss[i]  = (nssOv[i]  == LED_PIN_DEFAULT) ? LANE_DEFAULT_NSS[i]  : (int16_t)nssOv[i];
+        busy[i] = (busyOv[i] == LED_PIN_DEFAULT) ? LANE_DEFAULT_BUSY[i] : (int16_t)busyOv[i];
+    }
+    int16_t nfc[6];
+    for (int i = 0; i < 6; i++) {
+        nfc[i] = (nfcPins[i] == LED_PIN_DEFAULT) ? NFC_PIN_DEFAULTS[i] : (int16_t)nfcPins[i];
+    }
+    const LaneConfig::ReservedPin reserved[] = {
+        { nfc[(int)NfcPinId::Rst],  "NFC RST" },
+        { nfc[(int)NfcPinId::Sck],  "NFC SCK" },
+        { nfc[(int)NfcPinId::Mosi], "NFC MOSI" },
+        { nfc[(int)NfcPinId::Miso], "NFC MISO" },
+        { nfc[(int)NfcPinId::Nss],  "lane 1 NSS" },
+        { pn5180 ? nfc[(int)NfcPinId::Busy] : (int16_t)-1, "lane 1 BUSY" },
+        { (int16_t)effectiveLedPin, "status LED" },
+        { lcdOn ? (int16_t)PIN_LCD_SDA : (int16_t)-1, "LCD" },
+        { lcdOn ? (int16_t)PIN_LCD_SCL : (int16_t)-1, "LCD" },
+        { tftOn ? (int16_t)PIN_TFT_MOSI : (int16_t)-1, "TFT" },
+        { tftOn ? (int16_t)PIN_TFT_SCLK : (int16_t)-1, "TFT" },
+        { tftOn ? (int16_t)PIN_TFT_CS : (int16_t)-1, "TFT" },
+        { tftOn ? (int16_t)PIN_TFT_DC : (int16_t)-1, "TFT" },
+        { tftOn ? (int16_t)PIN_TFT_RST : (int16_t)-1, "TFT" },
+        { tftOn ? (int16_t)PIN_TFT_BL : (int16_t)-1, "TFT" },
+        { keypadOn ? (int16_t)PIN_KEYPAD_ROW1 : (int16_t)-1, "keypad" },
+        { keypadOn ? (int16_t)PIN_KEYPAD_ROW2 : (int16_t)-1, "keypad" },
+        { keypadOn ? (int16_t)PIN_KEYPAD_ROW3 : (int16_t)-1, "keypad" },
+        { keypadOn ? (int16_t)PIN_KEYPAD_ROW4 : (int16_t)-1, "keypad" },
+        { keypadOn ? (int16_t)PIN_KEYPAD_COL1 : (int16_t)-1, "keypad" },
+        { keypadOn ? (int16_t)PIN_KEYPAD_COL2 : (int16_t)-1, "keypad" },
+        { keypadOn ? (int16_t)PIN_KEYPAD_COL3 : (int16_t)-1, "keypad" },
+    };
+    return LaneConfig::validate(laneCount, NFC_MAX_LANES, nss, busy, pn5180,
+                                reserved, sizeof(reserved) / sizeof(reserved[0]),
+                                lanePinCap, err, errLen);
 }
 
 ConfigurationManager& ConfigurationManager::getInstance() {
@@ -536,6 +604,21 @@ bool ConfigurationManager::loadFromNVS() {
         }
     }
 
+    if (prefs.isKey(NVS_KEY_LANE_COUNT)) {
+        _laneCount = prefs.getUChar(NVS_KEY_LANE_COUNT, 1);
+        prefs.getBytes(NVS_KEY_LANE_NSS, _laneNss, sizeof(_laneNss));
+        prefs.getBytes(NVS_KEY_LANE_BUSY, _laneBusy, sizeof(_laneBusy));
+        char err[96];
+        if (!checkLanes(_laneCount, _laneNss, _laneBusy, _nfcPins, strcmp(_nfcReader, "pn5180") == 0,
+                        _lcdEnabled, _tftEnabled, _keypadEnabled, getLedPin(), err, sizeof(err))) {
+            // Keep the stored values so the config page can show and fix them,
+            // but run single-reader rather than drive a bad pin.
+            Serial.printf("ConfigurationManager: %s - running with 1 lane\n", err);
+            _laneCount = 1;
+        }
+        anyOverride = true;
+    }
+
     prefs.end();
     return anyOverride;
 }
@@ -672,6 +755,46 @@ uint8_t ConfigurationManager::getNfcPin(NfcPinId id) const {
     return (uint8_t)NFC_PIN_DEFAULTS[i];
 }
 
+uint8_t ConfigurationManager::getLaneCount() const { return _laneCount ? _laneCount : 1; }
+uint8_t ConfigurationManager::getMaxLanes() const { return NFC_MAX_LANES; }
+
+int16_t ConfigurationManager::getLaneDefaultNss(uint8_t lane) const {
+    if (lane == 0) return (int16_t)getNfcPin(NfcPinId::Nss);
+    return (lane < NFC_MAX_LANES) ? LANE_DEFAULT_NSS[lane] : -1;
+}
+
+int16_t ConfigurationManager::getLaneDefaultBusy(uint8_t lane) const {
+    if (lane == 0) return (int16_t)getNfcPin(NfcPinId::Busy);
+    return (lane < NFC_MAX_LANES) ? LANE_DEFAULT_BUSY[lane] : -1;
+}
+
+int16_t ConfigurationManager::getLaneNss(uint8_t lane) const {
+    if (lane == 0 || lane >= NFC_MAX_LANES) return getLaneDefaultNss(lane);
+    return (_laneNss[lane] != LED_PIN_DEFAULT) ? (int16_t)_laneNss[lane] : getLaneDefaultNss(lane);
+}
+
+int16_t ConfigurationManager::getLaneBusy(uint8_t lane) const {
+    if (lane == 0 || lane >= NFC_MAX_LANES) return getLaneDefaultBusy(lane);
+    return (_laneBusy[lane] != LED_PIN_DEFAULT) ? (int16_t)_laneBusy[lane] : getLaneDefaultBusy(lane);
+}
+
+bool ConfigurationManager::validateLanes(const ConfigUpdate& update, char* err, size_t errLen) const {
+#if defined(BOARD_NO_TFT)
+    constexpr bool tftOn = false;
+#else
+    const bool tftOn = update.tft_enabled != 0;
+#endif
+#if defined(BOARD_NO_KEYPAD)
+    constexpr bool keypadOn = false;
+#else
+    const bool keypadOn = update.keypad_enabled != 0;
+#endif
+    const uint8_t led = (update.led_pin == LED_PIN_DEFAULT) ? PIN_STATUS_LED : update.led_pin;
+    return checkLanes(update.lane_count, update.lane_nss, update.lane_busy, update.nfc_pins,
+                      strcmp(update.nfc_reader, "pn5180") == 0, update.lcd_enabled != 0,
+                      tftOn, keypadOn, led, err, errLen);
+}
+
 void ConfigurationManager::getCurrentConfig(ConfigUpdate& out) const {
     memset(&out, 0, sizeof(out));
     strncpy(out.wifi_ssid, _ssid, sizeof(out.wifi_ssid) - 1);
@@ -703,6 +826,9 @@ void ConfigurationManager::getCurrentConfig(ConfigUpdate& out) const {
     out.u1_auto_pick = _u1AutoPick ? 1 : 0;
     out.led_pin = _ledPin;
     memcpy(out.nfc_pins, _nfcPins, sizeof(out.nfc_pins));
+    out.lane_count = _laneCount;
+    memcpy(out.lane_nss, _laneNss, sizeof(out.lane_nss));
+    memcpy(out.lane_busy, _laneBusy, sizeof(out.lane_busy));
 }
 
 #ifndef NATIVE_TEST
@@ -786,6 +912,19 @@ bool ConfigurationManager::saveToNVS(const ConfigUpdate& update) {
         for (int i = 0; i < 6; i++) {
             prefs.putUChar(NVS_KEYS_NFC_PIN[i], pins[i]);
         }
+        // Lanes are checked against the NFC pins as saved. The web API
+        // refuses an invalid set with a message first; this is the backstop.
+        char err[96];
+        uint8_t laneCount = update.lane_count;
+        if (!checkLanes(laneCount, update.lane_nss, update.lane_busy, pins,
+                        strcmp(update.nfc_reader, "pn5180") == 0, update.lcd_enabled != 0,
+                        tftOn, keypadOn, effLed, err, sizeof(err))) {
+            Serial.printf("ConfigurationManager: %s - saving 1 lane\n", err);
+            laneCount = 1;
+        }
+        prefs.putUChar(NVS_KEY_LANE_COUNT, laneCount);
+        prefs.putBytes(NVS_KEY_LANE_NSS, update.lane_nss, sizeof(update.lane_nss));
+        prefs.putBytes(NVS_KEY_LANE_BUSY, update.lane_busy, sizeof(update.lane_busy));
     }
 
     // Invalidate Spoolman enrichment cache on config change to force re-fetch

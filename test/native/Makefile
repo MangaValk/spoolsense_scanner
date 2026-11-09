@@ -9,7 +9,7 @@ OT3D_OBJS = opentag3d_lib.o
 
 .PHONY: all clean test test_deduction_manager_compile
 
-all: test_deduction_tracker test_deduction_manager_compile test_raw_write_sidecar test_printer_manager test_opt_ndef_bounds test_diagnostics test_tft_landscape_layout test_tigertag_parser test_bambutag_parser test_write_uid_guard test_cc_sizing test_spool_cache test_opentag3d_runner test_ndef_mime_builder test_raw_write_slot
+all: test_deduction_tracker test_deduction_manager_compile test_raw_write_sidecar test_printer_manager test_opt_ndef_bounds test_diagnostics test_tft_landscape_layout test_tigertag_parser test_bambutag_parser test_write_uid_guard test_cc_sizing test_spool_cache test_opentag3d_runner test_ndef_mime_builder test_raw_write_slot test_lane_config
 
 openprinttag_lib.o: ../../lib/openprinttag/openprinttag_lib.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -62,10 +62,13 @@ test_opentag3d_runner: test_opentag3d_runner.c $(OT3D_OBJS)
 test_raw_write_slot: test_raw_write_slot.cpp ../../src/RawWriteSlot.h ../../src/RequestId.h
 	$(CXX) $(CXXFLAGS) -pthread -o $@ test_raw_write_slot.cpp
 
+test_lane_config: test_lane_config.cpp ../../src/LaneConfig.cpp ../../src/LaneConfig.h
+	$(CXX) $(CXXFLAGS) -o $@ test_lane_config.cpp ../../src/LaneConfig.cpp
+
 test_ndef_mime_builder: test_ndef_mime_builder.cpp ../../src/NdefMimeBuilder.h
 	$(CXX) $(CXXFLAGS) -o $@ test_ndef_mime_builder.cpp
 
-test: test_deduction_tracker test_deduction_manager_compile test_raw_write_sidecar test_printer_manager test_opt_ndef_bounds test_diagnostics test_tft_landscape_layout test_tigertag_parser test_bambutag_parser test_write_uid_guard test_cc_sizing test_spool_cache test_opentag3d_runner test_ndef_mime_builder test_raw_write_slot
+test: test_lane_config test_deduction_tracker test_deduction_manager_compile test_raw_write_sidecar test_printer_manager test_opt_ndef_bounds test_diagnostics test_tft_landscape_layout test_tigertag_parser test_bambutag_parser test_write_uid_guard test_cc_sizing test_spool_cache test_opentag3d_runner test_ndef_mime_builder test_raw_write_slot
 	@echo ""
 	@echo "=== Running PrinterManager tests ==="
 	@./test_printer_manager
@@ -109,8 +112,11 @@ test: test_deduction_tracker test_deduction_manager_compile test_raw_write_sidec
 	@echo "=== Running raw write slot tests ==="
 	@./test_raw_write_slot
 	@echo ""
+	@echo "=== Running lane config tests ==="
+	@./test_lane_config
+	@echo ""
 
 clean:
 	rm -f test_printer_manager test_opt_ndef_bounds test_diagnostics \
 	      test_tft_landscape_layout test_tigertag_parser test_bambutag_parser \
-	      test_deduction_tracker test_raw_write_sidecar test_write_uid_guard test_cc_sizing test_spool_cache test_opentag3d_runner test_ndef_mime_builder test_raw_write_slot *.o
+	      test_deduction_tracker test_raw_write_sidecar test_write_uid_guard test_cc_sizing test_spool_cache test_opentag3d_runner test_ndef_mime_builder test_raw_write_slot test_lane_config *.o

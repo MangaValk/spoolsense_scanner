@@ -1099,6 +1099,24 @@ void WebServerManager::handleApiGetConfig() {
             doc[defKey] = cm.getNfcPin((NfcPinId)i);
         }
     }
+    {
+        // Multi-reader lanes: lane 1 is the reader on the NFC pins above;
+        // lanes[] lists lanes 2..lane_max ("" = board default, *_default = that
+        // default, -1 = the board has none)
+        auto& cm = ConfigurationManager::getInstance();
+        doc["lane_count"] = cfg.lane_count ? cfg.lane_count : 1;
+        doc["lane_max"] = cm.getMaxLanes();
+        JsonArray lanes = doc["lanes"].to<JsonArray>();
+        for (uint8_t i = 1; i < cm.getMaxLanes(); i++) {
+            JsonObject l = lanes.add<JsonObject>();
+            if (cfg.lane_nss[i] == LED_PIN_DEFAULT) l["nss"] = "";
+            else l["nss"] = cfg.lane_nss[i];
+            if (cfg.lane_busy[i] == LED_PIN_DEFAULT) l["busy"] = "";
+            else l["busy"] = cfg.lane_busy[i];
+            l["nss_default"] = cm.getLaneDefaultNss(i);
+            l["busy_default"] = cm.getLaneDefaultBusy(i);
+        }
+    }
     doc["ap_mode"] = _apMode;
     if (_apMode) {
         extern char g_apSSID[];
@@ -1200,6 +1218,47 @@ void WebServerManager::handleApiPostConfig() {
             long p = strtol(s, &end, 10);
             bool numeric = (end != s) && (*end == '\0');
             update.nfc_pins[i] = (numeric && p >= 0 && p <= 254) ? (uint8_t)p : LED_PIN_DEFAULT;
+        }
+    }
+    {
+        // Multi-reader lanes. A client that doesn't send them (installer,
+        // older page) keeps the current lane settings.
+        ConfigUpdate current;
+        ConfigurationManager::getInstance().getCurrentConfig(current);
+        update.lane_count = current.lane_count ? current.lane_count : 1;
+        memcpy(update.lane_nss, current.lane_nss, sizeof(update.lane_nss));
+        memcpy(update.lane_busy, current.lane_busy, sizeof(update.lane_busy));
+        if (doc["lane_count"].is<int>()) {
+            int n = doc["lane_count"].as<int>();
+            update.lane_count = (n >= 1 && n <= 255) ? (uint8_t)n : 0;  // 0 fails validation
+        }
+        JsonArrayConst lanes = doc["lanes"].as<JsonArrayConst>();
+        if (!lanes.isNull()) {
+            // lanes[k] is lane k+2; same "" = default convention as the NFC pins
+            auto parsePin = [](JsonVariantConst v) -> uint8_t {
+                if (v.is<int>()) {
+                    int p = v.as<int>();
+                    return (p >= 0 && p <= 254) ? (uint8_t)p : LED_PIN_DEFAULT;
+                }
+                const char* s = v | "";
+                if (s[0] == '\0') return LED_PIN_DEFAULT;
+                char* end = nullptr;
+                long p = strtol(s, &end, 10);
+                bool numeric = (end != s) && (*end == '\0');
+                return (numeric && p >= 0 && p <= 254) ? (uint8_t)p : LED_PIN_DEFAULT;
+            };
+            uint8_t lane = 1;
+            for (JsonVariantConst l : lanes) {
+                if (lane >= LANE_SLOTS) break;
+                update.lane_nss[lane]  = parsePin(l["nss"]);
+                update.lane_busy[lane] = parsePin(l["busy"]);
+                lane++;
+            }
+        }
+        char laneErr[96];
+        if (!ConfigurationManager::getInstance().validateLanes(update, laneErr, sizeof(laneErr))) {
+            sendError(400, laneErr);
+            return;
         }
     }
 

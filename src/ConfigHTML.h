@@ -270,6 +270,18 @@ const char CONFIG_HTML[] PROGMEM = R"rawliteral(
                   <div class="hint" style="margin-top:6px">BUSY applies to PN5180 only; PN532 and RC522 use RST/NSS + SPI pins.</div>
                 </details>
               </div>
+
+              <div class="field" id="lanes_field" style="display:none">
+                <details>
+                  <summary style="cursor:pointer;color:var(--accent);font-size:0.95em">Multiple Readers / Lanes (advanced)</summary>
+                  <div class="hint" style="margin:8px 0">Drive several readers of the same type from this ESP32, e.g. one per BoxTurtle/AFC lane. Lane 1 is the reader on the pins above. Every further lane needs its own NSS/SS wire (and BUSY on the PN5180); RST, SCK, MOSI and MISO are shared by all lanes. Blank = board default. Changes apply after the device restarts on save.</div>
+                  <label style="font-size:0.85em">Number of lanes
+                    <input id="lane_count" type="number" min="1" max="1" value="1" style="width:5em"/>
+                  </label>
+                  <span id="lane_max_hint" class="hint"></span>
+                  <div id="lane_rows" style="display:grid;grid-template-columns:auto 1fr 1fr;gap:6px 8px;margin-top:8px;align-items:center"></div>
+                </details>
+              </div>
               <div class="toggle-row">
                 <span id="keypad_enabled_label" class="toggle-label">3x4 Matrix Keypad</span>
                 <label class="toggle-switch">
@@ -328,6 +340,60 @@ const char CONFIG_HTML[] PROGMEM = R"rawliteral(
 
   <script src="/js/shared.js?v=)rawliteral" FIRMWARE_VERSION R"rawliteral("></script>
   <script>
+    // Multi-reader lanes: rows for lanes 2..lane_max, shown up to lane_count
+    var laneMax = 1;
+    function showLaneRows() {
+      var n = parseInt(document.getElementById('lane_count').value) || 1;
+      for (var lane = 2; lane <= laneMax; lane++) {
+        var on = lane <= n;
+        ['lane_label_', 'lane_nss_', 'lane_busy_'].forEach(function(id) {
+          var el = document.getElementById(id + lane);
+          if (el) el.style.display = on ? '' : 'none';
+        });
+      }
+    }
+    function initLanes(cfg) {
+      laneMax = cfg.lane_max || 1;
+      if (laneMax < 2 || !cfg.lanes) return;  // board without multi-reader support
+      document.getElementById('lanes_field').style.display = '';
+      var count = document.getElementById('lane_count');
+      count.max = laneMax;
+      count.value = cfg.lane_count || 1;
+      document.getElementById('lane_max_hint').textContent = '(1-' + laneMax + ' on this board)';
+      var rows = document.getElementById('lane_rows');
+      rows.innerHTML = '';
+      cfg.lanes.forEach(function(l, i) {
+        var lane = i + 2;
+        var label = document.createElement('span');
+        label.id = 'lane_label_' + lane;
+        label.style.fontSize = '0.85em';
+        label.textContent = 'Lane ' + lane;
+        rows.appendChild(label);
+        [['nss', 'NSS/SS'], ['busy', 'BUSY']].forEach(function(f) {
+          var inp = document.createElement('input');
+          inp.type = 'number'; inp.min = 0; inp.max = 48; inp.style.width = '100%';
+          inp.id = 'lane_' + f[0] + '_' + lane;
+          var d = l[f[0] + '_default'];
+          inp.placeholder = f[1] + ((d !== undefined && d >= 0) ? ' (' + d + ')' : ' (set a pin)');
+          if (l[f[0]] !== undefined && l[f[0]] !== '') inp.value = l[f[0]];
+          rows.appendChild(inp);
+        });
+      });
+      count.addEventListener('input', showLaneRows);
+      showLaneRows();
+    }
+    function laneBody(body) {
+      if (document.getElementById('lanes_field').style.display === 'none') return;  // keep current
+      body.lane_count = parseInt(document.getElementById('lane_count').value) || 1;
+      body.lanes = [];
+      for (var lane = 2; lane <= laneMax; lane++) {
+        body.lanes.push({
+          nss: document.getElementById('lane_nss_' + lane).value.trim(),
+          busy: document.getElementById('lane_busy_' + lane).value.trim()
+        });
+      }
+    }
+
     function togglePass(id, btn) {
       var el = document.getElementById(id);
       if (el.type === 'password') { el.type = 'text'; btn.textContent = 'Hide'; }
@@ -374,6 +440,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawliteral(
         var d = cfg['pin_nfc_' + p + '_default'];
         if (d !== undefined) el.placeholder = d;
       });
+      initLanes(cfg);
       document.getElementById('keypad_enabled').checked = !!cfg.keypad_enabled;
       document.getElementById('tft_enabled').checked = !!cfg.tft_enabled;
       if (cfg.tft_driver) document.getElementById('tft_driver').value = cfg.tft_driver;
@@ -484,6 +551,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawliteral(
         u1_mode: parseInt(document.getElementById('u1_mode').value) || 0,
         u1_auto_pick: document.getElementById('u1_auto_pick').checked ? 1 : 0
       };
+      laneBody(body);
 
       fetch('/api/config', {
         method: 'POST',
