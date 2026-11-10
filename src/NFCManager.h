@@ -171,6 +171,9 @@ public:
     // safe point, checks the reader on the lane's pins (a temporary connection
     // if the lane is offline), then resumes. Takes up to ~5 s. Not on the scan task.
     bool testLane(uint8_t lane, LaneTestResult& out);
+    // Outcome of the most recent write request, for the web writer pages.
+    // Returns false if no write has finished yet.
+    bool getLastWriteResult(uint32_t& requestId, bool& ok, char* error, size_t errorLen);
 
     // Cooperative diagnostic pause for the self-test wizard (#253). Unlike
     // pauseScanTask()/vTaskSuspend, the scan task only stops at its safe loop
@@ -344,6 +347,14 @@ private:
     bool allocateLanes();      // size lanes_ from the config, before lane 0 starts
     bool beginExtraLanes();    // connections + queues for lanes 1..n-1
     void advanceScanLane();    // round-robin to the next online lane, RF off on the last
+
+    // Last finished write (scan task writes it under tagMutex; web reads it)
+    bool tagCanHold(size_t bytes, const char* what);  // ISO15693 size check before a full write
+    char writeError_[96] = {0};       // reason for the write in progress, set on failure
+    uint32_t lastWriteId_ = 0;
+    bool lastWriteOk_ = false;
+    bool lastWriteValid_ = false;
+    char lastWriteError_[96] = {0};
 };
 
 #endif // NFC_MANAGER_H

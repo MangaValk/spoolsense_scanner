@@ -33,6 +33,7 @@ public:
     bool mifareClassicRead(uint8_t blockNo, uint8_t* buffer) override;
     void getReaderInfo(char* buf, size_t len) const override;
     void rfOff() override;
+    int iso15693LastBlock(uint8_t neededBlocks) override;
     // Diagnostics: log RF_STATUS, IRQ_STATUS, SYSTEM_STATUS registers
     void logDiagnostics() override;
     // Structured snapshot: firmware + RF/IRQ/SYSTEM registers + bus-wedged latch.

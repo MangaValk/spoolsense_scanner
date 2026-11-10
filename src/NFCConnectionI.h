@@ -77,6 +77,10 @@ public:
     // drives several readers, so only one field is on at a time. Optional:
     // the default does nothing.
     virtual void rfOff() {}
+    // ISO15693 only: probe whether the tag has blocks 0..neededBlocks-1.
+    // Returns neededBlocks-1 if it does, the highest readable block if the tag
+    // is smaller, or -1 if unknown (other readers, or not even block 0 reads).
+    virtual int iso15693LastBlock(uint8_t neededBlocks) { (void)neededBlocks; return -1; }
 };
 
 #endif // NFC_CONNECTION_I_H
