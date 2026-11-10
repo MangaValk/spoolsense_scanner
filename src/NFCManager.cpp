@@ -2718,6 +2718,13 @@ bool NFCManager::isDuplicateSpool(const uint8_t* uid, uint8_t uid_length) {
     if (!scan_->lastSeenValid && scan_->currentSpool.present &&
         uid_length == scan_->currentSpool.uid_length &&
         memcmp(uid, scan_->currentSpool.uid, uid_length) == 0) {
+        // Still the current tag: mark it seen again. Otherwise lastSeenValid
+        // stays false while the tag sits there, and every cycle does a full
+        // reset (de-powering the tag) and logs "Tag detected!" again.
+        memcpy(scan_->lastSeenUid, uid, uid_length);
+        scan_->lastSeenUidLength = uid_length;
+        scan_->lastSeenValid = true;
+        scan_->lastSeenMs = millis();
         return true;
     }
 
