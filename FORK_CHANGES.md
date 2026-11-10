@@ -21,6 +21,7 @@ BoxTurtle/AFC lane). Each lane appears to the middleware and Home Assistant as i
 | merge | `fix/usb-serial-tx-timeout` | The boot stall fix, sent upstream as SpoolSense/spoolsense_scanner#342. |
 | merge | `fix/pn5180-rf-status-bit` | `setRF_on/off` check RF_STATUS bit 17 (TX_RF_STATUS), not bit 20; idle cycle 1.4 s -> 0.28 s. Upstream PR candidate. |
 | merge | `fix/redetect-loop` | `isDuplicateSpool()` marks the current tag seen again; ends the reset/re-detect loop after `requestCurrentSpool()` (138 → 1 re-detects in 26 s). Upstream PR candidate. |
+| merge | `fix/iso15693-write-capacity` | Refuse OpenPrintTag writes to ISO15693 tags that are too small or to NFC-A tags (NTAG); `last_write` in `/api/status`, `request_id` from `/api/write-tag`; writer page shows the reason. Upstream PR candidate. |
 
 ## New files (fork only, never conflict)
 
@@ -82,6 +83,7 @@ When a merge conflicts in one of these places, re-apply the "why" on top of the 
 | `src/main.cpp` | `setup()` | `Serial.setTxTimeoutMs(0)` (#342). |
 | `lib/PN5180/PN5180.{h,cpp}` | `setRF_on()`, `setRF_off()`, `RF_STATUS_TX_RF_ON` | Field-state check uses bit 17 (fix branch). |
 | `src/NFCManager.cpp` | `isDuplicateSpool()` first branch | Re-arm `lastSeen*` (fix branch; on `multilane` with `scan_->`). |
+| `src/NFCManager.cpp`, `NFCManager.h`, `HardwareNFCConnection.*`, `NFCConnectionI.h`, `WebServerManager.cpp`, `SharedJS.h` | `tagCanHold()`, `last_write` | Fix branch; on `multilane` with `scan_->`. |
 | `test/native/Makefile` | all, test, clean, rules | `test_lane_config`, `test_lane_ids`. |
 
 **Line endings:** upstream stores `src/ApplicationManager.h`, `src/NFCConnectionI.h` and `src/NFCWriteTypes.h` with
