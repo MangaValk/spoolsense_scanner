@@ -629,6 +629,7 @@ bool NFCManager::isSkippableDuplicate(const uint8_t* uid, uint8_t uidLength) {
 }
 
 void NFCManager::recordSelectedUid(const uint8_t* uid, uint8_t uidLength) {
+    selectedUidLen_ = uidLength;        // as detected, before the hex buffer's clamp
     if (uidLength > 8) uidLength = 8;   // selectedUidHex_ holds 8 bytes max
     for (uint8_t i = 0; i < uidLength; i++) {
         snprintf(scan_->selectedUidHex_ + (i * 2), 3, "%02X", uid[i]);
@@ -637,6 +638,7 @@ void NFCManager::recordSelectedUid(const uint8_t* uid, uint8_t uidLength) {
 }
 
 void NFCManager::clearSelectedUid() {
+    selectedUidLen_ = 0;
     scan_->selectedUidHex_[0] = '\0';
 }
 
@@ -1813,7 +1815,9 @@ void NFCManager::processWriteQueue() {
 
         // executeWrite() manages its own mutex internally
         bool success = executeWrite(request);
-        if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        // Wait longer than the usual 50 ms: a dropped result would leave the
+        // writer page waiting for a failure it can never see.
+        if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
             lastWriteId_ = request.request_id;
             lastWriteOk_ = success;
             lastWriteValid_ = true;
@@ -3056,8 +3060,11 @@ bool NFCManager::tagCanHold(size_t bytes, const char* what) {
     if (bytes == 0 || scan_->connection_ == nullptr) return true;
     // These images are ISO15693 (NFC-V) block writes; an NFC-A tag (NTAG,
     // MIFARE: 4- or 7-byte UID) can't take them at all
-    if (scan_->currentSpool.uid_length != 0 && scan_->currentSpool.uid_length != 8) {
-        const char* kind = (scan_->currentSpool.variant != NtagVariant::Unknown)
+    // Judge the tag selected this cycle, not currentSpool, which can still
+    // describe the previous tag when the cooldown skipped a refresh.
+    if (selectedUidLen_ != 0 && selectedUidLen_ != 8) {
+        const bool spoolIsSelected = strcmp(scan_->currentSpool.spool_id, scan_->selectedUidHex_) == 0;
+        const char* kind = (spoolIsSelected && scan_->currentSpool.variant != NtagVariant::Unknown)
                            ? ntagVariantName(scan_->currentSpool.variant) : "an NFC-A tag";
         snprintf(writeError_, sizeof(writeError_),
                  "%s needs an ISO15693 (NFC-V) tag, e.g. ICODE SLIX2; this is %s", what, kind);
