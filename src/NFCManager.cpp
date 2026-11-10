@@ -2370,6 +2370,11 @@ bool NFCManager::executeAtomicWrite(const NFCWriteRequest& request) {
         Serial.println("NFCManager: WRITE_ATOMIC - no atomic fields pending");
         return false;
     }
+    // Wrong tag type or too small: refuse with a clear reason before the
+    // checks below, which would only report a generic failure
+    if (!tagCanHold(312, "OpenPrintTag")) {
+        return false;
+    }
 
     AtomicWriteFields f = atomicWriteFields_;
     atomicWriteFields_.pending = false;
@@ -2453,9 +2458,6 @@ bool NFCManager::executeAtomicWrite(const NFCWriteRequest& request) {
     #undef ATOMIC_SET
 
     Serial.println("NFCManager: WRITE_ATOMIC writing to NFC...");
-    if (!tagCanHold(writeScratchTag_.data_size, "OpenPrintTag")) {
-        return false;
-    }
     opt_nfc_hal_t* hal = scan_->connection_->getHal();
     err = opt_write_to_nfc(&writeScratchTag_, hal);
     if (err != OPT_OK) {
