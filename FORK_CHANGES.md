@@ -22,6 +22,7 @@ BoxTurtle/AFC lane). Each lane appears to the middleware and Home Assistant as i
 | merge | `fix/pn5180-rf-status-bit` | `setRF_on/off` check RF_STATUS bit 17 (TX_RF_STATUS), not bit 20; idle cycle 1.4 s -> 0.28 s. Upstream PR candidate. |
 | merge | `fix/redetect-loop` | `isDuplicateSpool()` marks the current tag seen again; ends the reset/re-detect loop after `requestCurrentSpool()` (138 → 1 re-detects in 26 s). Upstream PR candidate. |
 | merge | `fix/iso15693-write-capacity` | Refuse OpenPrintTag writes to ISO15693 tags that are too small or to NFC-A tags (NTAG); `last_write` in `/api/status`, `request_id` from `/api/write-tag`; writer page shows the reason. Upstream PR candidate. |
+| merge | `fix/reread-after-write` | `forceRescan()` also clears `lastSeen*`, so a tag left on the reader is re-read after a write (writer pages no longer end in "Verification timed out"). Upstream PR candidate. |
 
 ## New files (fork only, never conflict)
 
