@@ -154,6 +154,9 @@ public:
     // answer at boot is offline and is never polled.
     uint8_t getLaneCount() const { return laneCount_; }
     bool isLaneOnline(uint8_t lane) const;
+    // Lane whose reader currently holds the tag with this UID (hex), or -1.
+    // Lets UID-keyed work (deductions, Spoolman results) reach the right reader.
+    int laneOfTag(const char* uid);
 
     // Cooperative diagnostic pause for the self-test wizard (#253). Unlike
     // pauseScanTask()/vTaskSuspend, the scan task only stops at its safe loop

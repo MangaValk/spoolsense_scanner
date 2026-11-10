@@ -196,7 +196,8 @@ bool HomeAssistantManager::begin() {
 #endif
 
     // Device ID from MAC address suffix — immutable per device, used for MQTT client ID and topic prefix
-    getDeviceId(deviceId_, sizeof(deviceId_));
+    getDeviceId(baseId_, sizeof(baseId_));
+    selectLane(0);
     Serial.printf("HomeAssistantManager: Initialized (device_id=%s)\n", deviceId_);
     return true;
 }
@@ -378,11 +379,21 @@ void HomeAssistantManager::taskLoop() {
                     reconnectDelay_ = 1000;  // reset exponential backoff on success
                     Serial.println("HomeAssistantManager: MQTT connected, publishing discovery/state");
                     // Reset discovery deduplication so reconnect publishes fresh entities
-                    lastDiscoveryUid_[0] = '\0';
-                    publishDiscovery();
-                    subscribeCommands();
+                    // One virtual scanner per reader lane (just one with a single reader)
+                    clearRemovedLanes();
+                    for (uint8_t lane = 0; lane < laneCount(); lane++) {
+                        selectLane(lane);
+                        discoveryUid()[0] = '\0';
+                        publishDiscovery();
+                        subscribeCommands();
+                    }
+                    selectLane(0);
                     publishAvailability("online");
-                    publishCurrentTagState();
+                    for (uint8_t lane = 0; lane < laneCount(); lane++) {
+                        selectLane(lane);
+                        publishCurrentTagState();
+                    }
+                    selectLane(0);
                     Serial.println("HomeAssistantManager: Connected to MQTT broker");
                     LogBuffer::getInstance().logPrintf("MQTT connected\n");
                 } else {
@@ -403,6 +414,7 @@ void HomeAssistantManager::taskLoop() {
         while (xQueueReceive(publishQueue, &req, 0) == pdTRUE) {
             if (mqttClient.connected()) {
                 mqttClient.publish(req.topic, req.payload, req.retained);
+                selectLane(laneOfTopic(req.topic));  // which reader lane this publish is for
                 char tagStateTopic[64];
                 char tagAttrsTopic[64];
                 snprintf(tagStateTopic, sizeof(tagStateTopic), "spoolsense/%s/tag/state", deviceId_);
@@ -413,15 +425,16 @@ void HomeAssistantManager::taskLoop() {
                     // Republish discovery only on UID change (command topics include UID, so discovery topics must too)
                     CurrentSpoolState state;
                     char currentUid[17] = {0};
-                    if (NFCManager::getInstance().getCurrentSpoolState(state) &&
+                    if (NFCManager::getInstance().getCurrentSpoolState(state, lane_) &&
                         state.present && state.spool_id[0] != '\0') {
                         strncpy(currentUid, state.spool_id, sizeof(currentUid) - 1);
                     }
-                    if (strcmp(currentUid, lastDiscoveryUid_) != 0) {
-                        strncpy(lastDiscoveryUid_, currentUid, sizeof(lastDiscoveryUid_) - 1);
+                    if (strcmp(currentUid, discoveryUid()) != 0) {
+                        strncpy(discoveryUid(), currentUid, 16);
                         publishDiscovery();
                     }
                 }
+                selectLane(0);
             }
         }
 
@@ -458,11 +471,11 @@ bool HomeAssistantManager::reconnect() {
 
     // Client ID is unique per device (MAC-based) for broker deduplication
     char clientId[32];
-    snprintf(clientId, sizeof(clientId), "spoolsense_%s", deviceId_);
+    snprintf(clientId, sizeof(clientId), "spoolsense_%s", baseId_);
 
     // Last-Will-Testament: publish "offline" if client drops unexpectedly
     char lwtTopic[64];
-    snprintf(lwtTopic, sizeof(lwtTopic), "spoolsense/%s/availability", deviceId_);
+    snprintf(lwtTopic, sizeof(lwtTopic), "spoolsense/%s/availability", baseId_);
 
     bool result;
     if (strlen(config.getHAMqttUser()) > 0) {
@@ -489,7 +502,7 @@ bool HomeAssistantManager::reconnect() {
 
 void HomeAssistantManager::publishAvailability(const char* state) {
     char topic[64];
-    snprintf(topic, sizeof(topic), "spoolsense/%s/availability", deviceId_);
+    snprintf(topic, sizeof(topic), "spoolsense/%s/availability", baseId_);
     mqttClient.publish(topic, state, true);
 }
 
@@ -504,10 +517,27 @@ void HomeAssistantManager::publishDiscovery() {
     // Discovery payloads use abbreviated HA keys (~) to fit in 768-byte buffer.
     char baseTopic[48];
     snprintf(baseTopic, sizeof(baseTopic), "spoolsense/%s", deviceId_);
+    // Availability is the ESP's (one MQTT will per connection), so with several
+    // lanes every lane's entities point at it. One reader: "~/availability" as before.
+    char availTopic[64];
+    char availBase[48];
+    char deviceName[32];
+    if (laneCount() > 1) {
+        snprintf(availBase, sizeof(availBase), "spoolsense/%s", baseId_);
+        snprintf(availTopic, sizeof(availTopic), "%s/availability", availBase);
+        snprintf(deviceName, sizeof(deviceName), "SpoolSense Lane %u", (unsigned)(lane_ + 1));
+    } else {
+        strncpy(availBase, baseTopic, sizeof(availBase) - 1);
+        availBase[sizeof(availBase) - 1] = '\0';
+        strncpy(availTopic, "~/availability", sizeof(availTopic) - 1);
+        availTopic[sizeof(availTopic) - 1] = '\0';
+        strncpy(deviceName, "SpoolSense Scanner", sizeof(deviceName) - 1);
+        deviceName[sizeof(deviceName) - 1] = '\0';
+    }
     // Include current UID in discovery so write commands are automatically scoped to the loaded spool
     char currentUid[64] = {0};
     CurrentSpoolState spoolState;
-    if (NFCManager::getInstance().getCurrentSpoolState(spoolState) &&
+    if (NFCManager::getInstance().getCurrentSpoolState(spoolState, lane_) &&
         spoolState.present &&
         spoolState.spool_id[0] != '\0') {
         strncpy(currentUid, spoolState.spool_id, sizeof(currentUid) - 1);
@@ -548,12 +578,12 @@ void HomeAssistantManager::publishDiscovery() {
                                "\"stat_t\":\"~/tag/state\",\"val_tpl\":\"%s\","
                                "\"json_attr_t\":\"~/tag/state\",\"json_attr_tpl\":\"{{ value_json }}\","
                                "\"cmd_t\":\"%s\",\"cmd_tpl\":\"%s\","
-                               "\"avty_t\":\"~/availability\",\"min\":%.1f,\"max\":%.1f,\"step\":%.1f,\"mode\":\"box\","
+                               "\"avty_t\":\"%s\",\"min\":%.1f,\"max\":%.1f,\"step\":%.1f,\"mode\":\"box\","
                                "\"unit_of_meas\":\"%s\",\"ic\":\"%s\","
                                "\"dev\":{\"ids\":[\"spoolsense_%s\"]}}",
                                baseTopic, name,
                                deviceId_, objectId, deviceId_, objectId,
-                               valTpl, cmdTopic, cmdTpl,
+                               valTpl, cmdTopic, cmdTpl, availTopic,
                                minV, maxV, stepV, unitOfMeas, icon, deviceId_);
         if (written < 0 || written >= (int)sizeof(payload)) {
             Serial.printf("HomeAssistantManager: Discovery payload too large for number/%s, skipping\n",
@@ -571,12 +601,12 @@ void HomeAssistantManager::publishDiscovery() {
                                "\"stat_t\":\"~/tag/state\",\"val_tpl\":\"%s\","
                                "\"json_attr_t\":\"~/tag/state\",\"json_attr_tpl\":\"{{ value_json }}\","
                                "\"cmd_t\":\"%s\",\"cmd_tpl\":\"%s\","
-                               "\"avty_t\":\"~/availability\","
+                               "\"avty_t\":\"%s\","
                                "\"options\":[\"PLA\",\"PETG\",\"ABS\",\"ASA\",\"TPU\",\"PC\",\"Nylon\",\"PVA\",\"HIPS\"],"
                                "\"ic\":\"%s\",\"dev\":{\"ids\":[\"spoolsense_%s\"]}}",
                                baseTopic, name,
                                deviceId_, objectId, deviceId_, objectId,
-                               valTpl, cmdTopic, cmdTpl,
+                               valTpl, cmdTopic, cmdTpl, availTopic,
                                icon, deviceId_);
         if (written < 0 || written >= (int)sizeof(payload)) {
             Serial.printf("HomeAssistantManager: Discovery payload too large for select/%s, skipping\n",
@@ -594,11 +624,11 @@ void HomeAssistantManager::publishDiscovery() {
                                "\"stat_t\":\"~/tag/state\",\"val_tpl\":\"%s\","
                                "\"json_attr_t\":\"~/tag/state\",\"json_attr_tpl\":\"{{ value_json }}\","
                                "\"cmd_t\":\"%s\",\"cmd_tpl\":\"%s\","
-                               "\"avty_t\":\"~/availability\",\"ic\":\"%s\","
+                               "\"avty_t\":\"%s\",\"ic\":\"%s\","
                                "\"dev\":{\"ids\":[\"spoolsense_%s\"]}}",
                                baseTopic, name,
                                deviceId_, objectId, deviceId_, objectId,
-                               valTpl, cmdTopic, cmdTpl,
+                               valTpl, cmdTopic, cmdTpl, availTopic,
                                icon, deviceId_);
         if (written < 0 || written >= (int)sizeof(payload)) {
             Serial.printf("HomeAssistantManager: Discovery payload too large for text/%s, skipping\n",
@@ -616,12 +646,12 @@ void HomeAssistantManager::publishDiscovery() {
                                "\"unique_id\":\"spoolsense_%s_spool\",\"obj_id\":\"spoolsense_%s_spool\","
                                "\"stat_t\":\"~/tag/state\","
                                "\"val_tpl\":\"{{ 'present' if value_json.present else 'not_present' }}\","
-                               "\"avty_t\":\"~/availability\","
+                               "\"avty_t\":\"%s\","
                                "\"json_attr_t\":\"~/tag/attributes\","
                                "\"ic\":\"mdi:printer-3d-nozzle\","
-                               "\"dev\":{\"ids\":[\"spoolsense_%s\"],\"name\":\"SpoolSense Scanner\","
+                               "\"dev\":{\"ids\":[\"spoolsense_%s\"],\"name\":\"%s\","
                                "\"mf\":\"SpoolSense\",\"sw\":\"%s\"}}",
-                               baseTopic, deviceId_, deviceId_, deviceId_, DEVICE_VERSION);
+                               baseTopic, deviceId_, deviceId_, availTopic, deviceId_, deviceName, DEVICE_VERSION);
         if (written >= 0 && written < (int)sizeof(payload)) {
             publishDiscoveryPayload("sensor", "spool", payload);
         } else {
@@ -642,7 +672,7 @@ void HomeAssistantManager::publishDiscovery() {
                                "\"ic\":\"mdi:alert-circle\","
                                "\"ent_cat\":\"diagnostic\","
                                "\"dev\":{\"ids\":[\"spoolsense_%s\"]}}",
-                               deviceId_, baseTopic, baseTopic, baseTopic, deviceId_);
+                               deviceId_, baseTopic, baseTopic, availBase, deviceId_);
         if (written >= 0 && written < (int)sizeof(payload)) {
             publishDiscoveryPayload("sensor", "printer_warning", payload);
         }
@@ -692,7 +722,7 @@ void HomeAssistantManager::publishDiscovery() {
 void HomeAssistantManager::publishCurrentTagState() {
     CurrentSpoolState& spool = spoolScratch_;
 
-    bool got = NFCManager::getInstance().getCurrentSpoolState(spool);
+    bool got = NFCManager::getInstance().getCurrentSpoolState(spool, lane_);
     char stateTopic[64];
     char attrsTopic[64];
     snprintf(stateTopic, sizeof(stateTopic), "spoolsense/%s/tag/state", deviceId_);
@@ -717,7 +747,7 @@ void HomeAssistantManager::publishCurrentTagState() {
 
     if (spool.kind == TagKind::TigerTag) {
         TigerTagData tt;
-        if (NFCManager::getInstance().getLastTigerTagData(tt) && tt.valid) {
+        if (NFCManager::getInstance().getLastTigerTagData(tt, lane_) && tt.valid) {
             f.tag_data_valid = true;
             strncpy(f.material_type, tt.material_name, sizeof(f.material_type) - 1);
             strncpy(f.material_name, tt.material_name, sizeof(f.material_name) - 1);
@@ -729,7 +759,7 @@ void HomeAssistantManager::publishCurrentTagState() {
         }
     } else if (spool.kind == TagKind::OpenTag3D) {
         opentag3d_t ot3d;
-        if (NFCManager::getInstance().getLastOpenTag3DData(ot3d)) {
+        if (NFCManager::getInstance().getLastOpenTag3DData(ot3d, lane_)) {
             f.tag_data_valid = true;
             strncpy(f.material_type, ot3d.base_material, sizeof(f.material_type) - 1);
             strncpy(f.material_name, ot3d.base_material, sizeof(f.material_name) - 1);
@@ -789,7 +819,10 @@ void HomeAssistantManager::mqttCallback(char* topic, uint8_t* payload, unsigned 
     memcpy(buf, payload, copyLen);
     buf[copyLen] = '\0';
 
-    getInstance().handleCommand(topic, buf);
+    // Commands may arrive for any lane: route to that lane, then go back to lane 0
+    HomeAssistantManager& self = getInstance();
+    self.handleCommand(topic, buf);
+    self.selectLane(0);
 }
 
 void HomeAssistantManager::handleCommand(const char* topic, const char* payload) {
@@ -797,6 +830,12 @@ void HomeAssistantManager::handleCommand(const char* topic, const char* payload)
 
     // Parse command topic: spoolsense/{id}/cmd/{command}[/uid]
     // UID in topic allows discovery to publish uid-specific commands (safe multi-scanner mode)
+    // Which lane (virtual scanner) this is for: spoolsense/<id>/cmd/...
+    if (strncmp(topic, "spoolsense/", 11) == 0) {
+        const char* idEnd = strchr(topic + 11, '/');
+        int lane = idEnd ? LaneIds::parse(baseId_, laneCount(), topic + 11, (size_t)(idEnd - topic - 11)) : -1;
+        if (lane >= 0) selectLane((uint8_t)lane);
+    }
     char cmdPrefix[64];
     snprintf(cmdPrefix, sizeof(cmdPrefix), "spoolsense/%s/cmd/", deviceId_);
 
@@ -874,7 +913,7 @@ void HomeAssistantManager::handleCommand(const char* topic, const char* payload)
 
         // If tag is currently on scanner, apply immediately (write to tag or Spoolman)
         CurrentSpoolState deductSpool;
-        if (NFCManager::getInstance().getCurrentSpoolState(deductSpool) &&
+        if (NFCManager::getInstance().getCurrentSpoolState(deductSpool, lane_) &&
             deductSpool.present && strcasecmp(deductSpool.spool_id, uidFromTopic) == 0) {
             DeductionManager::getInstance().applyIfPending(deductSpool.spool_id, deductSpool.kind);
         } else {
@@ -1038,7 +1077,7 @@ void HomeAssistantManager::handleCommand(const char* topic, const char* payload)
 
     // Require a loaded tag for write/update commands (tag present + valid state)
     CurrentSpoolState& spool = spoolScratch_;
-    if (!NFCManager::getInstance().getCurrentSpoolState(spool) || !spool.present) {
+    if (!NFCManager::getInstance().getCurrentSpoolState(spool, lane_) || !spool.present) {
         Serial.printf("HomeAssistantManager: Rejecting cmd '%s': no tag present\n", command);
         publishCommandResponse(command, false, "no_tag_present");
         return;
@@ -1094,6 +1133,7 @@ void HomeAssistantManager::handleCommand(const char* topic, const char* payload)
         AppMessage msg;
         memset(&msg, 0, sizeof(msg));
         msg.type = AppMessageType::HA_WRITE_TAG;
+        msg.lane = lane_;
         strncpy(msg.payload.haWriteTag.expected_uid, uid,
                 sizeof(msg.payload.haWriteTag.expected_uid) - 1);
 
@@ -1163,6 +1203,7 @@ void HomeAssistantManager::handleCommand(const char* topic, const char* payload)
         AppMessage msg;
         memset(&msg, 0, sizeof(msg));
         msg.type = AppMessageType::HA_UPDATE_REMAINING;
+        msg.lane = lane_;
         strncpy(msg.payload.haUpdateRemaining.expected_uid, uid,
                 sizeof(msg.payload.haUpdateRemaining.expected_uid) - 1);
         msg.payload.haUpdateRemaining.consumed_g = consumed;

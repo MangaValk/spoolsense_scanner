@@ -294,6 +294,14 @@ private:
     void enqueueSpoolmanSync(const SpoolDetectedPayload& spool);
     void publishToHA(const char* topicSuffix, const char* payload, bool retained);
     void scheduleTypeRemainDisplay(const char* material_name, float kg_remaining);
+
+    // Multi-reader lanes: the lane of the message being handled (0 with one
+    // reader), and the last published tag/state per lane. Lane 0 keeps
+    // lastHAStateJson_; further lanes get a heap buffer only when configured.
+    uint8_t msgLane_ = 0;
+    char (*laneHAState_)[512] = nullptr;
+    char* haStateJson(uint8_t lane);
+    void cacheHAState(const char* json);
 };
 
 #endif // APPLICATION_MANAGER_H

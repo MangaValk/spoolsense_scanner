@@ -3,6 +3,7 @@
 // Runs on the main loop (non-blocking, drain QUEUE_SIZE messages per cycle).
 
 #include "ApplicationManager.h"
+#include "LaneIds.h"
 #include "UserConfig.h"
 #include "ConversionUtils.h"
 #include "TagStateJson.h"
@@ -232,7 +233,37 @@ void ApplicationManager::scheduleTypeRemainDisplay(const char* material_name, fl
 
 // ── Message Dispatch ────────────────────────────────────────────────────────
 
+// Multi-reader lanes: NFC messages carry the lane of the reader they came
+// from and HA commands the lane of their topic; a Spoolman result belongs to
+// the reader holding that tag. Everything else is lane 0.
+static uint8_t laneOfMessage(const AppMessage& msg) {
+#ifndef NATIVE_TEST
+    auto& nfc = NFCManager::getInstance();
+    if (nfc.getLaneCount() <= 1) return 0;
+    switch (msg.type) {
+        case AppMessageType::SPOOL_DETECTED:
+        case AppMessageType::SPOOL_UPDATED:
+        case AppMessageType::BLANK_TAG_DETECTED:
+        case AppMessageType::GENERIC_TAG_DETECTED:
+        case AppMessageType::TAG_REMOVED:
+        case AppMessageType::HA_WRITE_TAG:
+        case AppMessageType::HA_UPDATE_REMAINING:
+            return (msg.lane < nfc.getLaneCount()) ? msg.lane : 0;
+        case AppMessageType::SPOOLMAN_SYNCED: {
+            int lane = nfc.laneOfTag(msg.payload.spoolmanSynced.spool_id);
+            return (lane > 0) ? (uint8_t)lane : 0;
+        }
+        default:
+            return 0;
+    }
+#else
+    (void)msg;
+    return 0;
+#endif
+}
+
 void ApplicationManager::handleMessage(const AppMessage& msg) {
+    msgLane_ = laneOfMessage(msg);
     // Route each message type to its handler (tag detections, print events, HA commands, etc.)
     switch (msg.type) {
         case AppMessageType::PRINT_STARTED:
@@ -463,7 +494,7 @@ void ApplicationManager::handleSpoolDetected(const AppMessage& msg) {
 #ifndef NATIVE_TEST
     {
         CurrentSpoolState deductState;
-        if (NFCManager::getInstance().getCurrentSpoolState(deductState) && deductState.present) {
+        if (NFCManager::getInstance().getCurrentSpoolState(deductState, msgLane_) && deductState.present) {
             float deducted = DeductionManager::getInstance().applyIfPending(
                 deductState.spool_id, deductState.kind);
             if (deducted > 0.0f) {
@@ -484,7 +515,7 @@ void ApplicationManager::handleSpoolDetected(const AppMessage& msg) {
         f.tag_format = "unknown";
 #ifndef NATIVE_TEST
         CurrentSpoolState spoolState = {};
-        if (NFCManager::getInstance().getCurrentSpoolState(spoolState))
+        if (NFCManager::getInstance().getCurrentSpoolState(spoolState, msgLane_))
             f.tag_format = tagKindToMqttFormat(spoolState.kind);
 #endif
         strncpy(f.material_type, s.material_name, sizeof(f.material_type) - 1);
@@ -518,7 +549,7 @@ void ApplicationManager::handleSpoolDetected(const AppMessage& msg) {
 
 #ifndef NATIVE_TEST
         BambuTagData bambuData;
-        if (spoolState.kind == TagKind::BambuTag && NFCManager::getInstance().getLastBambuTagData(bambuData)) {
+        if (spoolState.kind == TagKind::BambuTag && NFCManager::getInstance().getLastBambuTagData(bambuData, msgLane_)) {
             strncpy(f.material_name, bambuData.filament_type, sizeof(f.material_name) - 1);
             strncpy(f.material_type, bambuData.filament_type, sizeof(f.material_type) - 1);
             snprintf(f.color, sizeof(f.color), "#%02X%02X%02X",
@@ -537,8 +568,7 @@ void ApplicationManager::handleSpoolDetected(const AppMessage& msg) {
         char json[512];
         buildTagStateJson(json, sizeof(json), f);
         publishToHA("tag/state", json, true);
-        strncpy(lastHAStateJson_, json, sizeof(lastHAStateJson_) - 1);
-        lastHAStateJson_[sizeof(lastHAStateJson_) - 1] = '\0';
+        cacheHAState(json);
     }
 
 #ifndef NATIVE_TEST
@@ -607,7 +637,7 @@ void ApplicationManager::handleSpoolUpdated(const AppMessage& msg) {
     float kgRemaining = msg.payload.spoolUpdated.kg_remaining;
 
     CurrentSpoolState state;
-    if (NFCManager::getInstance().getCurrentSpoolState(state) && state.tag_data_valid) {
+    if (NFCManager::getInstance().getCurrentSpoolState(state, msgLane_) && state.tag_data_valid) {
         opt_get_material_name(&state.tag_data, materialName, sizeof(materialName));
     }
 #ifndef NATIVE_TEST
@@ -687,7 +717,7 @@ void ApplicationManager::handleSpoolUpdated(const AppMessage& msg) {
         spoolmanConfigured && msg.payload.spoolUpdated.success && shouldSyncAfterUpdate) {
         // Reconstruct SpoolDetectedPayload from NFCManager state (has full tag data)
         CurrentSpoolState state;
-        if (NFCManager::getInstance().getCurrentSpoolState(state) && state.tag_data_valid) {
+        if (NFCManager::getInstance().getCurrentSpoolState(state, msgLane_) && state.tag_data_valid) {
             SpoolDetectedPayload fakeSpool;
             memset(&fakeSpool, 0, sizeof(fakeSpool));
             strncpy(fakeSpool.spool_id, msg.payload.spoolUpdated.spool_id, sizeof(fakeSpool.spool_id) - 1);
@@ -763,8 +793,7 @@ void ApplicationManager::handleBlankTagDetected(const AppMessage& msg) {
         char json[512];
         buildTagStateJson(json, sizeof(json), f);
         publishToHA("tag/state", json, true);
-        strncpy(lastHAStateJson_, json, sizeof(lastHAStateJson_) - 1);
-        lastHAStateJson_[sizeof(lastHAStateJson_) - 1] = '\0';
+        cacheHAState(json);
     }
 }
 
@@ -808,8 +837,7 @@ void ApplicationManager::handleGenericTagDetected(const AppMessage& msg) {
         char json[512];
         buildTagStateJson(json, sizeof(json), f);
         publishToHA("tag/state", json, true);
-        strncpy(lastHAStateJson_, json, sizeof(lastHAStateJson_) - 1);
-        lastHAStateJson_[sizeof(lastHAStateJson_) - 1] = '\0';
+        cacheHAState(json);
     }
 
     // Enqueue Spoolman UID lookup (result → SPOOLMAN_SYNCED event)
@@ -891,7 +919,7 @@ void ApplicationManager::handleSpoolmanSynced(const AppMessage& msg) {
     // U1 integration is disabled.
     {
         CurrentSpoolState u1State;
-        NFCManager::getInstance().getCurrentSpoolState(u1State);
+        NFCManager::getInstance().getCurrentSpoolState(u1State, msgLane_);
         U1Manager::getInstance().publishFromSpoolmanSync(msg.payload.spoolmanSynced, u1State);
         if (U1Manager::getInstance().hasStagedSpool() && display_) {
             display_->showText("U1: pick tool", "Web UI or 0-3 #");
@@ -904,7 +932,7 @@ void ApplicationManager::handleSpoolmanSynced(const AppMessage& msg) {
     if (msg.payload.spoolmanSynced.is_uid_lookup && msg.payload.spoolmanSynced.success) {
         // Safety: verify tag still present and matches UID (may have been removed during Spoolman request)
         CurrentSpoolState spoolState;
-        bool tagStillPresent = NFCManager::getInstance().getCurrentSpoolState(spoolState)
+        bool tagStillPresent = NFCManager::getInstance().getCurrentSpoolState(spoolState, msgLane_)
                                && spoolState.present
                                && spoolState.kind == TagKind::GenericUidTag
                                && strcmp(spoolState.spool_id, msg.payload.spoolmanSynced.spool_id) == 0;
@@ -919,7 +947,7 @@ void ApplicationManager::handleSpoolmanSynced(const AppMessage& msg) {
             info.extruder_temp = msg.payload.spoolmanSynced.extruder_temp;
             info.bed_temp = msg.payload.spoolmanSynced.bed_temp;
             info.valid = true;
-            NFCManager::getInstance().setGenericTagSpoolInfo(info);
+            NFCManager::getInstance().setGenericTagSpoolInfo(info, msgLane_);
         }
     }
 #endif
@@ -930,7 +958,7 @@ void ApplicationManager::handleSpoolmanSynced(const AppMessage& msg) {
             // Success on UID lookup: check if tag is generic or smart to decide display strategy
 #ifndef NATIVE_TEST
             CurrentSpoolState state;
-            bool gotState = NFCManager::getInstance().getCurrentSpoolState(state);
+            bool gotState = NFCManager::getInstance().getCurrentSpoolState(state, msgLane_);
             bool isGeneric = !gotState || state.kind == TagKind::GenericUidTag;
 #else
             bool isGeneric = true;
@@ -965,7 +993,7 @@ void ApplicationManager::handleSpoolmanSynced(const AppMessage& msg) {
             // Lookup failed: generic tag not in Spoolman — show error for generic only
 #ifndef NATIVE_TEST
             CurrentSpoolState state;
-            bool gotState = NFCManager::getInstance().getCurrentSpoolState(state);
+            bool gotState = NFCManager::getInstance().getCurrentSpoolState(state, msgLane_);
             bool isGeneric = !gotState || state.kind == TagKind::GenericUidTag;
 #else
             bool isGeneric = true;
@@ -1020,7 +1048,7 @@ void ApplicationManager::handleSpoolmanSynced(const AppMessage& msg) {
     // Write Spoolman ID back to tag if it's new or changed
     if (msg.payload.spoolmanSynced.success && msg.payload.spoolmanSynced.spoolman_id > 0) {
         CurrentSpoolState state;
-        if (NFCManager::getInstance().getCurrentSpoolState(state) && state.tag_data_valid) {
+        if (NFCManager::getInstance().getCurrentSpoolState(state, msgLane_) && state.tag_data_valid) {
             int32_t existingId = -1;
             opt_get_gp_spoolman_id(&state.tag_data, &existingId);
             if (existingId != msg.payload.spoolmanSynced.spoolman_id) {
@@ -1031,6 +1059,7 @@ void ApplicationManager::handleSpoolmanSynced(const AppMessage& msg) {
                         sizeof(request.expected_spool_id) - 1);
                 request.expected_spool_id[sizeof(request.expected_spool_id) - 1] = '\0';
                 request.data.spoolman_id = msg.payload.spoolmanSynced.spoolman_id;
+                request.lane = msgLane_;
                 NFCManager::getInstance().enqueueWrite(request);
                 Serial.printf("ApplicationManager: Enqueued WRITE_SPOOLMAN_ID %d for spool %s\n",
                     msg.payload.spoolmanSynced.spoolman_id, msg.payload.spoolmanSynced.spool_id);
@@ -1082,26 +1111,27 @@ void ApplicationManager::handleTagRemoved(const AppMessage& msg) {
     lastDisplayedSpoolId[0] = '\0';
     lastDisplayedBlankId[0] = '\0';
 #ifndef NATIVE_TEST
-    NFCManager::getInstance().clearGenericTagSpoolInfo();
+    NFCManager::getInstance().clearGenericTagSpoolInfo(msgLane_);
 #endif
     // Arm deferred status screen: show status after 5s delay (debounce rapid re-taps)
     tagRemovedAtMs = millis();
     pendingStatusAfterTagRemoved = true;
 
     // HA MQTT: publish tag removed state by flipping present:false in cached JSON
-    if (lastHAStateJson_[0] != '\0') {
+    const char* cachedState = haStateJson(msgLane_);
+    if (cachedState != nullptr && cachedState[0] != '\0') {
         char removed[512];
-        char* pos = strstr(lastHAStateJson_, "\"present\":true");
+        const char* pos = strstr(cachedState, "\"present\":true");
         if (pos) {
             // Replace "present":true with "present":false, keep rest of payload
-            size_t prefix_len = pos - lastHAStateJson_;
-            memcpy(removed, lastHAStateJson_, prefix_len);
+            size_t prefix_len = pos - cachedState;
+            memcpy(removed, cachedState, prefix_len);
             snprintf(removed + prefix_len, sizeof(removed) - prefix_len,
                      "\"present\":false%s",
                      pos + strlen("\"present\":true"));
             publishToHA("tag/state", removed, true);
         } else {
-            publishToHA("tag/state", lastHAStateJson_, true);
+            publishToHA("tag/state", cachedState, true);
         }
     } else {
         // Fallback: no prior state cached
@@ -1129,6 +1159,7 @@ void ApplicationManager::handleHAWriteTag(const AppMessage& msg) {
     req.type = NFCWriteType::CHANGE_FILAMENT_TYPE;
     strncpy(req.expected_spool_id, p.expected_uid, sizeof(req.expected_spool_id) - 1);
     req.data.new_material_type = p.material_type;
+    req.lane = msgLane_;
     NFCManager::getInstance().enqueueWrite(req);
 
     // Color
@@ -1137,6 +1168,7 @@ void ApplicationManager::handleHAWriteTag(const AppMessage& msg) {
     req.type = NFCWriteType::CHANGE_COLOR;
     strncpy(req.expected_spool_id, p.expected_uid, sizeof(req.expected_spool_id) - 1);
     memcpy(req.data.new_color, p.color, 4);
+    req.lane = msgLane_;
     NFCManager::getInstance().enqueueWrite(req);
 
     // Brand name
@@ -1145,6 +1177,7 @@ void ApplicationManager::handleHAWriteTag(const AppMessage& msg) {
     req.type = NFCWriteType::SET_BRAND_NAME;
     strncpy(req.expected_spool_id, p.expected_uid, sizeof(req.expected_spool_id) - 1);
     strncpy(req.data.brand_name, p.manufacturer, sizeof(req.data.brand_name) - 1);
+    req.lane = msgLane_;
     NFCManager::getInstance().enqueueWrite(req);
 
     // Remaining weight: compute consumed = initial - remaining (tag stores "used", not "remaining")
@@ -1156,6 +1189,7 @@ void ApplicationManager::handleHAWriteTag(const AppMessage& msg) {
         req.type = NFCWriteType::SET_CONSUMED_WEIGHT;
         strncpy(req.expected_spool_id, p.expected_uid, sizeof(req.expected_spool_id) - 1);
         req.data.consumed_weight = consumed;
+        req.lane = msgLane_;
         NFCManager::getInstance().enqueueWrite(req);
     }
 
@@ -1166,6 +1200,7 @@ void ApplicationManager::handleHAWriteTag(const AppMessage& msg) {
         req.type = NFCWriteType::WRITE_SPOOLMAN_ID;
         strncpy(req.expected_spool_id, p.expected_uid, sizeof(req.expected_spool_id) - 1);
         req.data.spoolman_id = p.spoolman_id;
+        req.lane = msgLane_;
         NFCManager::getInstance().enqueueWrite(req);
     }
 }
@@ -1185,6 +1220,7 @@ void ApplicationManager::handleHAUpdateRemaining(const AppMessage& msg) {
     req.type = NFCWriteType::SET_CONSUMED_WEIGHT;
     strncpy(req.expected_spool_id, p.expected_uid, sizeof(req.expected_spool_id) - 1);
     req.data.consumed_weight = p.consumed_g;
+    req.lane = msgLane_;
     NFCManager::getInstance().enqueueWrite(req);
 }
 
@@ -1290,8 +1326,8 @@ void ApplicationManager::publishToHA(const char* topicSuffix, const char* payloa
     HAPublishRequest req;
     memset(&req, 0, sizeof(req));
 
-    char deviceId[7];
-    HomeAssistantManager::getDeviceId(deviceId, sizeof(deviceId));
+    char deviceId[LaneIds::MAX_LEN];
+    HomeAssistantManager::getLaneDeviceId(msgLane_, deviceId, sizeof(deviceId));
     snprintf(req.topic, sizeof(req.topic), "spoolsense/%s/%s", deviceId, topicSuffix);
     strncpy(req.payload, payload, sizeof(req.payload) - 1);
     req.retained = retained;  // Retained: broker keeps last value for new subscribers
@@ -1528,3 +1564,29 @@ bool ApplicationManager::sendAssignSpool(const char* toolNumber) {
 #endif
 }
 
+// ── Multi-reader lanes ──────────────────────────────────────────────────────
+
+// Last published tag/state of a lane (sizeof(lastHAStateJson_) bytes), or
+// nullptr if that lane has no buffer (unknown lane, or out of memory).
+char* ApplicationManager::haStateJson(uint8_t lane) {
+    if (lane == 0) return lastHAStateJson_;
+#ifndef NATIVE_TEST
+    const uint8_t count = NFCManager::getInstance().getLaneCount();
+    if (lane >= count) return nullptr;
+    if (laneHAState_ == nullptr) {
+        // Lanes 2..n, allocated once and only when more than one reader is configured
+        laneHAState_ = new (std::nothrow) char[count - 1][sizeof(lastHAStateJson_)]();
+        if (laneHAState_ == nullptr) return nullptr;
+    }
+    return laneHAState_[lane - 1];
+#else
+    return nullptr;
+#endif
+}
+
+void ApplicationManager::cacheHAState(const char* json) {
+    char* buf = haStateJson(msgLane_);
+    if (buf == nullptr) return;  // no buffer: the removal path falls back to an empty state
+    strncpy(buf, json, sizeof(lastHAStateJson_) - 1);
+    buf[sizeof(lastHAStateJson_) - 1] = '\0';
+}

@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <atomic>
 #include "NFCTypes.h"
+#include "LaneIds.h"
+#include "ConfigurationManager.h"
 
 #ifndef NATIVE_TEST
   #include <freertos/FreeRTOS.h>
@@ -35,6 +37,11 @@ public:
 
     // Generate device ID from MAC (last 6 hex chars)
     static void getDeviceId(char* buf, size_t bufSize);
+    // Device ID of one reader lane: the stock ID with one reader, <id>-L<n>
+    // with several (each lane is published as its own virtual scanner).
+    static void getLaneDeviceId(uint8_t lane, char* buf, size_t bufSize);
+    // Point deviceId_ (topics, discovery, command parsing) at a lane. MQTT task only.
+    void selectLane(uint8_t lane);
 
 private:
     HomeAssistantManager() = default;
@@ -77,11 +84,22 @@ private:
     static constexpr UBaseType_t TASK_PRIORITY = 2;
 
     // Device ID cache
-    char deviceId_[7] = {0}; // 6 hex chars + null
+    char deviceId_[LaneIds::MAX_LEN] = {0}; // current lane's ID; the 6-hex stock ID with one reader
     CurrentSpoolState spoolScratch_;
 
     // Discovery dedup — only re-publish when UID changes
     char lastDiscoveryUid_[17] = {0};
+
+    // Multi-reader lanes (HomeAssistantManagerLanes.cpp). baseId_ is the ESP's
+    // own ID: MQTT client ID, availability/LWT. lane_ is the lane deviceId_
+    // currently points at; lanes 2..n keep their discovery dedup UID here.
+    char baseId_[7] = {0};
+    uint8_t lane_ = 0;
+    char laneDiscoveryUid_[LANE_SLOTS][17] = {};
+    static uint8_t laneCount();
+    char* discoveryUid();
+    uint8_t laneOfTopic(const char* topic) const;  // spoolsense/<id>/... -> lane (0 if not a lane topic)
+    void clearRemovedLanes();  // drop retained HA devices of lanes that no longer exist
 };
 
 #endif // HOME_ASSISTANT_MANAGER_H

@@ -197,8 +197,11 @@ float DeductionManager::applyOpenPrintTag(const char* uid, float pending,
                                           bool* enqueued, uint32_t* requestIdOut) {
     *enqueued = false;
 #ifndef NATIVE_TEST
+    // Several readers: the deduction belongs to the reader holding this tag
+    int lane = NFCManager::getInstance().laneOfTag(uid);
+    if (lane < 0) lane = 0;
     CurrentSpoolState state;
-    if (!NFCManager::getInstance().getCurrentSpoolState(state)) {
+    if (!NFCManager::getInstance().getCurrentSpoolState(state, (uint8_t)lane)) {
         tracker_.abortUid(uid);
         return 0.0f;
     }
@@ -221,6 +224,7 @@ float DeductionManager::applyOpenPrintTag(const char* uid, float pending,
     req.request_id = NFCManager::getInstance().generateRequestId();
     req.type = NFCWriteType::REMOVE_WEIGHT;
     req.data.grams_to_remove = deduction;
+    req.lane = (uint8_t)lane;
     strncpy(req.expected_spool_id, uid, sizeof(req.expected_spool_id) - 1);
 
     tracker_.bind(uid, req.request_id);
@@ -247,8 +251,11 @@ float DeductionManager::applyOpenTag3D(const char* uid, float pending,
                                        bool* enqueued, uint32_t* requestIdOut) {
     *enqueued = false;
 #ifndef NATIVE_TEST
+    // Several readers: the deduction belongs to the reader holding this tag
+    int lane = NFCManager::getInstance().laneOfTag(uid);
+    if (lane < 0) lane = 0;
     opentag3d_t ot3d;
-    if (!NFCManager::getInstance().getLastOpenTag3DData(ot3d)) {
+    if (!NFCManager::getInstance().getLastOpenTag3DData(ot3d, (uint8_t)lane)) {
         Serial.printf("DeductionManager: No cached OpenTag3D data for %s\n", uid);
         tracker_.abortUid(uid);  // read glitch — retry next scan
         return 0.0f;
@@ -292,6 +299,7 @@ float DeductionManager::applyOpenTag3D(const char* uid, float pending,
     memset(&req, 0, sizeof(req));
     req.request_id = NFCManager::getInstance().generateRequestId();
     req.type = NFCWriteType::WRITE_OPENTAG3D;
+    req.lane = (uint8_t)lane;
     strncpy(req.expected_spool_id, uid, sizeof(req.expected_spool_id) - 1);
 
     tracker_.bind(uid, req.request_id);

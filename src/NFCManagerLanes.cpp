@@ -126,6 +126,22 @@ bool NFCManager::isLaneOnline(uint8_t lane) const {
     return lane < laneCount_ && lanes_[lane].online && lanes_[lane].connection_ != nullptr;
 }
 
+int NFCManager::laneOfTag(const char* uid) {
+    if (uid == nullptr || uid[0] == '\0') return -1;
+    if (laneCount_ <= 1) {
+        return 0;  // one reader: everything belongs to it, as before
+    }
+    int found = -1;
+    if (tagMutex && xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        for (uint8_t i = 0; i < laneCount_ && found < 0; i++) {
+            const CurrentSpoolState& s = lanes_[i].currentSpool;
+            if (s.present && strncmp(s.spool_id, uid, sizeof(s.spool_id)) == 0) found = i;
+        }
+        xSemaphoreGive(tagMutex);
+    }
+    return found;
+}
+
 void NFCManager::advanceScanLane() {
     if (onlineLanes_ <= 1) return;  // one working reader: exactly the single-reader behaviour
     // Finish the lane we just polled: field off, so only one is ever on
