@@ -19,6 +19,7 @@ BoxTurtle/AFC lane). Each lane appears to the middleware and Home Assistant as i
 | `8152bdc` | `ml/05-lane-mqtt` | `<id>-L<n>` virtual scanners: MQTT, HA discovery per lane, command routing. |
 | `5a8e721` | `ml/06-web-lanes` | `/api/lanes`, the per-lane reader test, the lanes list on the config page. |
 | merge | `fix/usb-serial-tx-timeout` | The boot stall fix, sent upstream as SpoolSense/spoolsense_scanner#342. |
+| merge | `fix/pn5180-rf-status-bit` | `setRF_on/off` check RF_STATUS bit 17 (TX_RF_STATUS), not bit 20; idle cycle 1.4 s -> 0.28 s. Upstream PR candidate. |
 
 ## New files (fork only, never conflict)
 
@@ -78,6 +79,7 @@ When a merge conflicts in one of these places, re-apply the "why" on top of the 
 | `src/WebServerManager.cpp` | `handleApiStatus()` | `serializeLanes(doc)` (no-op with one reader). |
 | `src/ConfigHTML.h` | NFC pins section, script | "Multiple Readers / Lanes" section, `initLanes`, `laneBody`, `loadLaneStatus`, `testLane`. |
 | `src/main.cpp` | `setup()` | `Serial.setTxTimeoutMs(0)` (#342). |
+| `lib/PN5180/PN5180.{h,cpp}` | `setRF_on()`, `setRF_off()`, `RF_STATUS_TX_RF_ON` | Field-state check uses bit 17 (fix branch). |
 | `test/native/Makefile` | all, test, clean, rules | `test_lane_config`, `test_lane_ids`. |
 
 **Line endings:** upstream stores `src/ApplicationManager.h`, `src/NFCConnectionI.h` and `src/NFCWriteTypes.h` with
