@@ -2055,6 +2055,12 @@ bool NFCManager::validateWriteUid(const char* expectedUid, const char* writeType
 void NFCManager::forceRescan() {
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         scan_->currentSpool.present = false;
+        // Forget the tag as "last seen" too, so the next poll really re-reads
+        // it. With removal debounced (3 missed detects), a tag that stays on
+        // the reader never clears lastSeenValid by itself, and the duplicate
+        // check (incl. the 3 s prefix cooldown) would skip it for good.
+        scan_->lastSeenValid = false;
+        scan_->lastSeenUidLength = 0;
         xSemaphoreGive(tagMutex);
     }
 }
