@@ -72,6 +72,11 @@ public:
         getReaderInfo(out.reader_name, sizeof(out.reader_name));
         return true;
     }
+
+    // Switch this reader's RF field off. Used between lanes when one ESP32
+    // drives several readers, so only one field is on at a time. Optional:
+    // the default does nothing.
+    virtual void rfOff() {}
 };
 
 #endif // NFC_CONNECTION_I_H

@@ -47,6 +47,9 @@ struct NFCWriteRequest {
         int32_t spoolman_id;        // Spoolman spool ID for tag write-back
         uint8_t tigertag_data[40];  // TigerTag binary payload (pages 4-13)
     } data;
+    // Reader (lane) whose tag this write is for, 0-based. Zero-initialized
+    // requests go to the first (or only) reader.
+    uint8_t lane;
 };
 
 #endif // NFC_WRITE_TYPES_H

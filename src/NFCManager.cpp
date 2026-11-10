@@ -58,6 +58,11 @@ bool NFCManager::begin() {
         }
     };
 
+    // More than one reader: size the lane array before lane 0 starts
+    if (!allocateLanes()) {
+        return false;
+    }
+
     // Create hardware connection if none was injected
     if (lanes_[0].connection_ == nullptr) {
 #ifndef NATIVE_TEST
@@ -114,84 +119,90 @@ bool NFCManager::begin() {
     lanes_[0].suppressReDetection_ = false;
     lanes_[0].suppressReDetectionUid_[0] = '\0';
 
+    // Lanes 1..n-1 (no-op with one reader). A lane whose reader doesn't
+    // answer stays offline; it never fails begin() for lane 0.
+    beginExtraLanes();
+
     Serial.println("NFCManager: Initialized successfully");
     return true;
 }
 
-bool NFCManager::getCurrentSpoolState(CurrentSpoolState& out) {
-    if (tagMutex == nullptr) {
+bool NFCManager::getCurrentSpoolState(CurrentSpoolState& out, uint8_t lane) {
+    if (tagMutex == nullptr || lane >= laneCount_) {
         return false;
     }
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
         return false;
     }
-    out = lanes_[0].currentSpool;
+    out = lanes_[lane].currentSpool;
     xSemaphoreGive(tagMutex);
     return true;
 }
 
-bool NFCManager::getLastTigerTagData(TigerTagData& out) {
-    if (tagMutex == nullptr) return false;
+bool NFCManager::getLastTigerTagData(TigerTagData& out, uint8_t lane) {
+    if (tagMutex == nullptr || lane >= laneCount_) return false;
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
-    bool valid = lanes_[0].lastTigerTagValid_;
-    if (valid) out = lanes_[0].lastTigerTag_;
+    bool valid = lanes_[lane].lastTigerTagValid_;
+    if (valid) out = lanes_[lane].lastTigerTag_;
     xSemaphoreGive(tagMutex);
     return valid;
 }
 
-bool NFCManager::getLastOpenTag3DData(opentag3d_t& out) {
-    if (tagMutex == nullptr) return false;
+bool NFCManager::getLastOpenTag3DData(opentag3d_t& out, uint8_t lane) {
+    if (tagMutex == nullptr || lane >= laneCount_) return false;
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
-    bool valid = lanes_[0].lastOpenTag3DValid_;
-    if (valid) out = lanes_[0].lastOpenTag3D_;
+    bool valid = lanes_[lane].lastOpenTag3DValid_;
+    if (valid) out = lanes_[lane].lastOpenTag3D_;
     xSemaphoreGive(tagMutex);
     return valid;
 }
 
-bool NFCManager::getLastOpenSpoolData(OpenSpoolData& out) {
-    if (tagMutex == nullptr) return false;
+bool NFCManager::getLastOpenSpoolData(OpenSpoolData& out, uint8_t lane) {
+    if (tagMutex == nullptr || lane >= laneCount_) return false;
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
-    bool valid = lanes_[0].lastOpenSpoolValid_;
-    if (valid) out = lanes_[0].lastOpenSpool_;
+    bool valid = lanes_[lane].lastOpenSpoolValid_;
+    if (valid) out = lanes_[lane].lastOpenSpool_;
     xSemaphoreGive(tagMutex);
     return valid;
 }
 
-bool NFCManager::getLastBambuTagData(BambuTagData& out) {
-    if (tagMutex == nullptr) return false;
+bool NFCManager::getLastBambuTagData(BambuTagData& out, uint8_t lane) {
+    if (tagMutex == nullptr || lane >= laneCount_) return false;
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
-    bool valid = lanes_[0].lastBambuTagValid_;
-    if (valid) out = lanes_[0].lastBambuTag_;
+    bool valid = lanes_[lane].lastBambuTagValid_;
+    if (valid) out = lanes_[lane].lastBambuTag_;
     xSemaphoreGive(tagMutex);
     return valid;
 }
 
-void NFCManager::setGenericTagSpoolInfo(const GenericTagSpoolInfo& info) {
+void NFCManager::setGenericTagSpoolInfo(const GenericTagSpoolInfo& info, uint8_t lane) {
+    if (lane >= laneCount_) return;
     if (tagMutex && xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        lanes_[0].lastGenericTagSpoolInfo_ = info;
+        lanes_[lane].lastGenericTagSpoolInfo_ = info;
         xSemaphoreGive(tagMutex);
     }
 }
 
-void NFCManager::getGenericTagSpoolInfo(GenericTagSpoolInfo& out) {
-    if (tagMutex && xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        out = lanes_[0].lastGenericTagSpoolInfo_;
+void NFCManager::getGenericTagSpoolInfo(GenericTagSpoolInfo& out, uint8_t lane) {
+    if (lane < laneCount_ && tagMutex && xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        out = lanes_[lane].lastGenericTagSpoolInfo_;
         xSemaphoreGive(tagMutex);
     } else {
         out = {};
     }
 }
 
-void NFCManager::clearGenericTagSpoolInfo() {
+void NFCManager::clearGenericTagSpoolInfo(uint8_t lane) {
+    if (lane >= laneCount_) return;
     if (tagMutex && xSemaphoreTake(tagMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        lanes_[0].lastGenericTagSpoolInfo_ = {};
+        lanes_[lane].lastGenericTagSpoolInfo_ = {};
         xSemaphoreGive(tagMutex);
     }
 }
 
-bool NFCManager::getNfcReaderInfo(char* buf, size_t len) const {
-    if (!lanes_[0].connection_ || !buf || len == 0) return false;
-    lanes_[0].connection_->getReaderInfo(buf, len);
+bool NFCManager::getNfcReaderInfo(char* buf, size_t len, uint8_t lane) const {
+    if (lane >= laneCount_ || !lanes_[lane].connection_ || !buf || len == 0) return false;
+    lanes_[lane].connection_->getReaderInfo(buf, len);
     return true;
 }
 
@@ -577,8 +588,11 @@ bool NFCManager::prepareRF() {
         attemptRecovery();
     }
 
-    // Full hardware reset only when no tag present — reset cuts RF, de-powering passive tags
-    if (!scan_->lastSeenValid) {
+    // Full hardware reset only when no tag present — reset cuts RF, de-powering passive tags.
+    // With several readers, the other lanes' resets (shared RST) and RF-off
+    // already cut this lane's field, so every turn starts cold.
+    const bool coldStart = !scan_->lastSeenValid || onlineLanes_ > 1;
+    if (coldStart) {
         scan_->connection_->reset();
     }
     if (!scan_->connection_->setupRF()) {
@@ -593,7 +607,7 @@ bool NFCManager::prepareRF() {
     }
 
     // Give tag time to power up after RF field reset
-    if (!scan_->lastSeenValid) {
+    if (coldStart) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     scan_->consecutiveFailures_ = 0;
@@ -810,6 +824,10 @@ void NFCManager::scanLoop() {
             }
             scanPaused_ = false;
         }
+        // More than one reader: move to the next online lane (RF off on the
+        // lane we just finished). No-op with one reader.
+        advanceScanLane();
+
         SCAN_PHASE(1);
         uint8_t uid[8];
         uint8_t uidLength = 0;
@@ -857,7 +875,8 @@ void NFCManager::scanLoop() {
         }
 
         SCAN_PHASE(9);
-        vTaskDelay(pdMS_TO_TICKS(50));
+        // The 50 ms poll interval is per reader: spread it across the lanes
+        vTaskDelay(pdMS_TO_TICKS(onlineLanes_ > 1 ? 10 : 50));
     }
 }
 
@@ -1093,6 +1112,7 @@ void NFCManager::sendOpenPrintTagMessage(bool suppress_spoolman_sync) {
     }
 
     AppMessage msg;
+    msg.lane = scanLaneIndex();
     memset(&msg, 0, sizeof(msg));  // every other SPOOL_DETECTED sender zeroes; an
                                    // uninitialized weight_is_nominal here randomly
                                    // suppressed the Spoolman weight sync
@@ -1209,6 +1229,7 @@ void NFCManager::sendBambuDetectedMessage() {
 
     const BambuTagData& bt = scan_->lastBambuTag_;
     AppMessage msg;
+    msg.lane = scanLaneIndex();
     msg.type = AppMessageType::SPOOL_DETECTED;
     memset(&msg.payload.spoolDetected, 0, sizeof(msg.payload.spoolDetected));
 
@@ -1251,6 +1272,7 @@ void NFCManager::sendBambuDetectedMessage() {
 
 void NFCManager::sendBlankTagMessage() {
     AppMessage msg;
+    msg.lane = scanLaneIndex();
     msg.type = AppMessageType::BLANK_TAG_DETECTED;
     strncpy(msg.payload.blankTag.spool_id, scan_->currentSpool.spool_id,
             sizeof(msg.payload.blankTag.spool_id) - 1);
@@ -1261,6 +1283,7 @@ void NFCManager::sendBlankTagMessage() {
 
 void NFCManager::sendGenericTagMessage() {
     AppMessage msg;
+    msg.lane = scanLaneIndex();
     memset(&msg, 0, sizeof(msg));
     msg.type = AppMessageType::GENERIC_TAG_DETECTED;
     strncpy(msg.payload.genericTag.spool_id, scan_->currentSpool.spool_id,
@@ -1271,6 +1294,7 @@ void NFCManager::sendGenericTagMessage() {
 
 void NFCManager::sendTigerTagMessage(const TigerTagData& tt) {
     AppMessage msg;
+    msg.lane = scanLaneIndex();
     memset(&msg, 0, sizeof(msg));
     msg.type = AppMessageType::SPOOL_DETECTED;
 
@@ -1354,6 +1378,7 @@ void NFCManager::sendTigerTagMessage(const TigerTagData& tt) {
 
 void NFCManager::sendOpenTag3DMessage(const opentag3d_t& ot3d) {
     AppMessage msg;
+    msg.lane = scanLaneIndex();
     memset(&msg, 0, sizeof(msg));
     msg.type = AppMessageType::SPOOL_DETECTED;
 
@@ -1467,6 +1492,7 @@ void NFCManager::sendOpenTag3DMessage(const opentag3d_t& ot3d) {
 
 void NFCManager::sendOpenSpoolMessage(const char* uid, const OpenSpoolData& os) {
     AppMessage msg;
+    msg.lane = scanLaneIndex();
     msg.type = AppMessageType::SPOOL_DETECTED;
     auto& s = msg.payload.spoolDetected;
     memset(&s, 0, sizeof(s));
@@ -1583,6 +1609,7 @@ TagScanResult NFCManager::classifyTag(const uint8_t* uid, uint8_t uid_length) {
 
 void NFCManager::sendTagRemovedMessage() {
     AppMessage msg;
+    msg.lane = scanLaneIndex();
     memset(&msg, 0, sizeof(msg));
     msg.type = AppMessageType::TAG_REMOVED;
     strncpy(msg.payload.tagRemoved.spool_id, scan_->currentSpool.spool_id,
@@ -1656,7 +1683,7 @@ uint32_t NFCManager::generateRequestId() {
     return nextRequestId(s_write_request_id_counter);
 }
 
-bool NFCManager::writeSpoolmanDataToTag(int32_t spoolman_id, const char* expected_spool_id) {
+bool NFCManager::writeSpoolmanDataToTag(int32_t spoolman_id, const char* expected_spool_id, uint8_t lane) {
 #ifdef NATIVE_TEST
     // In native tests, SpoolmanManager is not available
     Serial.println("NFCManager: writeSpoolmanDataToTag not supported in native tests");
@@ -1720,6 +1747,7 @@ bool NFCManager::writeSpoolmanDataToTag(int32_t spoolman_id, const char* expecte
     memset(&req, 0, sizeof(req));  // CRITICAL: zero-init (per MEMORY.md)
     req.request_id = generateRequestId();
     req.type = NFCWriteType::WRITE_RAW_TAG;
+    req.lane = lane;
     if (expected_spool_id != nullptr) {
         strncpy(req.expected_spool_id, expected_spool_id, sizeof(req.expected_spool_id) - 1);
     }
@@ -1733,7 +1761,7 @@ bool NFCManager::writeSpoolmanDataToTag(int32_t spoolman_id, const char* expecte
 }
 
 bool NFCManager::enqueueWrite(const NFCWriteRequest& req) {
-    if (lanes_[0].writeQueue == nullptr) {
+    if (req.lane >= laneCount_ || lanes_[req.lane].writeQueue == nullptr) {
         return false;
     }
 
@@ -1742,18 +1770,18 @@ bool NFCManager::enqueueWrite(const NFCWriteRequest& req) {
         return true;  // Already done, return success
     }
 
-    bool queued = xQueueSend(lanes_[0].writeQueue, &req, pdMS_TO_TICKS(100)) == pdTRUE;
+    bool queued = xQueueSend(lanes_[req.lane].writeQueue, &req, pdMS_TO_TICKS(100)) == pdTRUE;
 
     // If this is part of a batch (suppress_sync or FORMAT_NEW), set suppression flag
     if (queued && (req.suppress_sync || req.type == NFCWriteType::FORMAT_NEW)) {
-        lanes_[0].suppressReDetection_ = true;
+        lanes_[req.lane].suppressReDetection_ = true;
         if (req.expected_spool_id[0] != '\0') {
-            strncpy(lanes_[0].suppressReDetectionUid_, req.expected_spool_id, sizeof(lanes_[0].suppressReDetectionUid_) - 1);
-            lanes_[0].suppressReDetectionUid_[sizeof(lanes_[0].suppressReDetectionUid_) - 1] = '\0';
+            strncpy(lanes_[req.lane].suppressReDetectionUid_, req.expected_spool_id, sizeof(lanes_[req.lane].suppressReDetectionUid_) - 1);
+            lanes_[req.lane].suppressReDetectionUid_[sizeof(lanes_[req.lane].suppressReDetectionUid_) - 1] = '\0';
         }
         // Track if this batch has suppress_sync
         if (req.suppress_sync) {
-            lanes_[0].batchHadSuppressSync_ = true;
+            lanes_[req.lane].batchHadSuppressSync_ = true;
         }
     }
 
@@ -1801,6 +1829,8 @@ void NFCManager::processWriteQueue() {
 
         // Build and send the update message with snapshotted data
         AppMessage msg = {};
+    msg.lane = scanLaneIndex();
+        msg.lane = scanLaneIndex();
         msg.type = AppMessageType::SPOOL_UPDATED;
         msg.payload.spoolUpdated.request_id = request.request_id;
         strncpy(msg.payload.spoolUpdated.spool_id, snapshotSpoolId,
@@ -2613,6 +2643,7 @@ bool NFCManager::executeWrite(const NFCWriteRequest& request) {
 
 void NFCManager::sendSpoolUpdatedMessage(uint32_t request_id, NFCWriteType type, bool success) {
     AppMessage msg = {};
+    msg.lane = scanLaneIndex();
     msg.type = AppMessageType::SPOOL_UPDATED;
     // request_id is the correlation key for deduction settlement (#329) —
     // never inferred from the write type.
@@ -2712,9 +2743,11 @@ bool NFCManager::isDuplicateSpool(const uint8_t* uid, uint8_t uid_length) {
 
 void NFCManager::requestCurrentSpool() {
     if (xSemaphoreTake(tagMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        lanes_[0].lastSeenValid = false;
-        memset(lanes_[0].lastSeenUid, 0, sizeof(lanes_[0].lastSeenUid));
-        lanes_[0].lastSeenUidLength = 0;
+        for (uint8_t i = 0; i < laneCount_; i++) {
+            lanes_[i].lastSeenValid = false;
+            memset(lanes_[i].lastSeenUid, 0, sizeof(lanes_[i].lastSeenUid));
+            lanes_[i].lastSeenUidLength = 0;
+        }
         xSemaphoreGive(tagMutex);
     }
 }
@@ -2908,8 +2941,10 @@ void NFCManager::updateRecentSpoolSyncStatus(const char* spool_id, bool synced) 
 }
 
 bool NFCManager::isWriteQueueEmpty() const {
-    if (!lanes_[0].writeQueue) return true;
-    return uxQueueMessagesWaiting(lanes_[0].writeQueue) == 0;
+    for (uint8_t i = 0; i < laneCount_; i++) {
+        if (lanes_[i].writeQueue && uxQueueMessagesWaiting(lanes_[i].writeQueue) != 0) return false;
+    }
+    return true;
 }
 
 bool NFCManager::readBambuTag(const uint8_t* uid, uint8_t uidLength, BambuTagData& out) {

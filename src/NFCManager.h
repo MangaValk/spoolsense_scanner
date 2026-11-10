@@ -118,6 +118,9 @@ struct NFCLaneState {
     volatile bool suppressReDetection_ = false;
     char suppressReDetectionUid_[17] = {0};
     volatile bool batchHadSuppressSync_ = false;  // Track if any write in batch had suppress_sync
+
+    // Multi-reader lanes: false when the reader did not answer at boot
+    bool online = true;
 };
 
 class NFCManager {
@@ -129,21 +132,28 @@ public:
     bool enqueueRawWrite(const NFCWriteRequest& req, const uint8_t* data, size_t dataSize);
     bool enqueueOpenTag3DPatch(const NFCWriteRequest& req, const opentag3d_patch_t& patch);
     void setAtomicWriteFields(const AtomicWriteFields& fields) { atomicWriteFields_ = fields; }
-    bool writeSpoolmanDataToTag(int32_t spoolman_id, const char* expected_spool_id = nullptr);
+    bool writeSpoolmanDataToTag(int32_t spoolman_id, const char* expected_spool_id = nullptr, uint8_t lane = 0);
     bool isRequestCompleted(uint32_t request_id);    // Check if request done
     uint32_t generateRequestId();                    // Monotonic request ID
-    void requestCurrentSpool();                      // Clear dedup to resend current spool
+    void requestCurrentSpool();                      // Clear dedup to resend current spool (every lane)
     bool scanOnce();                                 // Single scan cycle (for testing)
-    bool getCurrentSpoolState(CurrentSpoolState& out);
-    bool getLastTigerTagData(TigerTagData& out);
-    bool getLastOpenTag3DData(opentag3d_t& out);
-    bool getLastOpenSpoolData(OpenSpoolData& out);
-    bool getLastBambuTagData(BambuTagData& out);
+    // lane: which reader (0-based); single-reader setups only have lane 0
+    bool getCurrentSpoolState(CurrentSpoolState& out, uint8_t lane = 0);
+    bool getLastTigerTagData(TigerTagData& out, uint8_t lane = 0);
+    bool getLastOpenTag3DData(opentag3d_t& out, uint8_t lane = 0);
+    bool getLastOpenSpoolData(OpenSpoolData& out, uint8_t lane = 0);
+    bool getLastBambuTagData(BambuTagData& out, uint8_t lane = 0);
     // Returns reader identification string (e.g. "PN5180 v3.4", "PN532 v1.6")
-    bool getNfcReaderInfo(char* buf, size_t len) const;
+    bool getNfcReaderInfo(char* buf, size_t len, uint8_t lane = 0) const;
     void pauseScanTask();
     void resumeScanTask();
-    bool isWriteQueueEmpty() const;
+    bool isWriteQueueEmpty() const;  // every lane
+
+    // Multi-reader lanes (NFCManagerLanes.cpp). One lane per reader; lane 0
+    // is the reader on the regular NFC pins. A lane whose reader did not
+    // answer at boot is offline and is never polled.
+    uint8_t getLaneCount() const { return laneCount_; }
+    bool isLaneOnline(uint8_t lane) const;
 
     // Cooperative diagnostic pause for the self-test wizard (#253). Unlike
     // pauseScanTask()/vTaskSuspend, the scan task only stops at its safe loop
@@ -157,7 +167,9 @@ public:
     bool waitForScanPaused(uint32_t timeoutMs);
     // Reader connection — only safe to drive directly while isScanPaused() is
     // true; otherwise it races the scan loop on the SPI bus.
-    NFCConnectionI* getDiagConnection() { return lanes_[0].connection_; }
+    NFCConnectionI* getDiagConnection(uint8_t lane = 0) {
+        return (lane < laneCount_) ? lanes_[lane].connection_ : nullptr;
+    }
 
     // Dependency injection for testing
     void setConnection(NFCConnectionI* conn) { lanes_[0].connection_ = conn; }
@@ -171,16 +183,17 @@ public:
         openTag3DPatchRequestId_ = 0;
         memset(&openTag3DPatch_, 0, sizeof(openTag3DPatch_));
         // Drain write queue
-        if (lanes_[0].writeQueue) {
+        for (uint8_t i = 0; i < laneCount_; i++) {
+            if (!lanes_[i].writeQueue) continue;
             NFCWriteRequest dummy;
-            while (xQueueReceive(lanes_[0].writeQueue, &dummy, 0) == pdTRUE) {}
+            while (xQueueReceive(lanes_[i].writeQueue, &dummy, 0) == pdTRUE) {}
         }
     }
 
     // Generic tag resolved Spoolman data (set after UID lookup, cleared on tag remove)
-    void setGenericTagSpoolInfo(const GenericTagSpoolInfo& info);
-    void getGenericTagSpoolInfo(GenericTagSpoolInfo& out);
-    void clearGenericTagSpoolInfo();
+    void setGenericTagSpoolInfo(const GenericTagSpoolInfo& info, uint8_t lane = 0);
+    void getGenericTagSpoolInfo(GenericTagSpoolInfo& out, uint8_t lane = 0);
+    void clearGenericTagSpoolInfo(uint8_t lane = 0);
 
     // Recent spools history (RAM only)
     static constexpr size_t MAX_RECENT_SPOOLS = 10;
@@ -302,10 +315,18 @@ private:
 
     // Per-reader state. scan_ is the lane the scan task is working on; it is
     // only read and written on the scan task. Callers on other tasks address
-    // a lane explicitly (lanes_[0] while there is one reader).
-    static constexpr uint8_t MAX_LANES = 1;
-    NFCLaneState lanes_[MAX_LANES];
-    NFCLaneState* scan_ = &lanes_[0];
+    // a lane explicitly (lanes_[lane]).
+    // One reader: lanes_ points at lane0_ (no heap). More readers: begin()
+    // points it at a heap array of laneCount_ entries (lane0_ is then unused).
+    NFCLaneState lane0_;
+    NFCLaneState* lanes_ = &lane0_;
+    uint8_t laneCount_ = 1;
+    uint8_t onlineLanes_ = 1;  // lanes with a reader; the multi-reader scan rules apply only when > 1
+    NFCLaneState* scan_ = &lane0_;
+    uint8_t scanLaneIndex() const { return (uint8_t)(scan_ - lanes_); }
+    bool allocateLanes();      // size lanes_ from the config, before lane 0 starts
+    bool beginExtraLanes();    // connections + queues for lanes 1..n-1
+    void advanceScanLane();    // round-robin to the next online lane, RF off on the last
 };
 
 #endif // NFC_MANAGER_H

@@ -31,6 +31,20 @@ struct NfcReaderPins {
         p.miso = cfg.getNfcPin(NfcPinId::Miso);
         return p;
     }
+
+    // Pins of one lane (0-based) when one ESP32 drives several readers:
+    // RST and the SPI bus are shared, NSS and BUSY are the lane's own.
+    // Lane 0 is the reader on the regular NFC pins.
+    static NfcReaderPins forLane(uint8_t lane) {
+        NfcReaderPins p = fromConfig();
+        if (lane == 0) return p;
+        auto& cfg = ConfigurationManager::getInstance();
+        const int16_t nss = cfg.getLaneNss(lane);
+        const int16_t busy = cfg.getLaneBusy(lane);
+        p.nss = (nss >= 0) ? (uint8_t)nss : 0;
+        p.busy = (busy >= 0) ? (uint8_t)busy : 0;
+        return p;
+    }
 };
 
 #endif // NFC_READER_PINS_H

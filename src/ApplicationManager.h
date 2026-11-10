@@ -169,6 +169,9 @@ struct AppMessage {
             char digit; // '0'–'9'
         } keypadDigit;
     } payload;
+    // Reader (lane) the message comes from, 0-based. Set by NFCManager on
+    // NFC messages; 0 on single-reader setups. Other senders leave it unset.
+    uint8_t lane;
 };
 
 class ApplicationManager {

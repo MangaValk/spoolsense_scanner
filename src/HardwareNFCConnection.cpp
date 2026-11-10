@@ -217,6 +217,12 @@ bool HardwareNFCConnection::begin() {
     return true;
 }
 
+void HardwareNFCConnection::rfOff() {
+    if (nfc_) {
+        nfc_->setRF_off();
+    }
+}
+
 void HardwareNFCConnection::reset() {
     if (nfc_) {
         nfc_->reset();

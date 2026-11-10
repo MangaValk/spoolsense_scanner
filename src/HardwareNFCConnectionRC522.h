@@ -41,6 +41,7 @@ public:
                             const uint8_t* data, uint16_t dataLen) override;
     void getReaderInfo(char* buf, size_t len) const override;
     void logDiagnostics() override;
+    void rfOff() override;
     bool getDiagnosticSnapshot(ReaderDiagnostics& out) override;
 
 private:

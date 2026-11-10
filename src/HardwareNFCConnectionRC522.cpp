@@ -157,6 +157,15 @@ bool HardwareNFCConnectionRC522::begin() {
     return true;
 }
 
+void HardwareNFCConnectionRC522::rfOff() {
+    // Multi-reader lanes: antenna off between this lane's turns
+    tagSessionActive_ = false;
+    if (!reader_) return;
+    SharedSPIBus::Guard spiGuard;
+    if (!spiGuard) return;
+    reader_->PCD_AntennaOff();
+}
+
 void HardwareNFCConnectionRC522::reset() {
     // Implements NFCConnectionI::reset() using the MFRC522v2 soft-reset path.
     tagSessionActive_ = false;
