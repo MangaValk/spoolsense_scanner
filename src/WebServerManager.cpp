@@ -256,6 +256,8 @@ bool WebServerManager::begin(bool apMode, uint16_t port) {
     _server.on("/api/config",          HTTP_GET,  [this]() { handleApiGetConfig(); });
     registerJsonPost("/api/config", [this]() { handleApiPostConfig(); });
     _server.on("/api/status",          HTTP_GET,  [this]() { handleApiStatus(); });
+    _server.on("/api/lanes",           HTTP_GET,  [this]() { handleApiLanes(); });
+    _server.on("/api/lanes/test",      HTTP_POST, [this]() { handleApiLaneTest(); });
     _server.on("/api/diagnostics",     HTTP_GET,  [this]() { handleApiDiagnostics(); });
     registerJsonPost("/api/diagnostics/session", [this]() { handleApiSelfTestStart(); });
     _server.on("/api/diagnostics/session",        HTTP_GET,  [this]() { handleApiSelfTestStatus(); });
@@ -1828,6 +1830,7 @@ void WebServerManager::handleApiStatus() {
     }
 
     serializeEnrichment(doc);
+    serializeLanes(doc);  // only adds lane_count/lanes[] with more than one reader
 
     String body;
     serializeJson(doc, body);

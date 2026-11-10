@@ -158,3 +158,49 @@ void NFCManager::advanceScanLane() {
     }
     // No other lane online: stay on the current one (lane 0 always is)
 }
+
+bool NFCManager::testLane(uint8_t lane, LaneTestResult& out) {
+    memset(&out, 0, sizeof(out));
+    strncpy(out.reader, "no reader", sizeof(out.reader) - 1);
+#ifndef NATIVE_TEST
+    if (lane >= laneCount_) return false;
+    const NfcReaderPins pins = NfcReaderPins::forLane(lane);
+    out.nss = pins.nss;
+    out.busy = pins.busy;
+    out.online = isLaneOnline(lane);
+
+    // Same cooperative pause as the self-test: never mid-SPI
+    requestScanPause();
+    if (!waitForScanPaused(6000)) {  // a scan cycle that is reading a tag can take a few seconds
+        resumeScan();
+        strncpy(out.reader, "scanner busy", sizeof(out.reader) - 1);
+        return false;
+    }
+    const unsigned long t0 = millis();
+    if (out.online) {
+        out.answers = readerAnswers(lanes_[lane].connection_);
+        if (out.answers) lanes_[lane].connection_->getReaderInfo(out.reader, sizeof(out.reader));
+    } else {
+        // Offline since boot: try a fresh connection on the lane's pins. Its
+        // RST pulse resets every PN5180 on the shared line; that is harmless,
+        // because each lane's next poll runs setupRF() again anyway.
+        NFCConnectionI* probe = createLaneConnection(pins);
+        if (probe != nullptr) {
+            out.answers = probe->begin() && readerAnswers(probe);
+            if (out.answers) probe->getReaderInfo(out.reader, sizeof(out.reader));
+            delete probe;
+        }
+        PN5180::clearBusWedged();  // a missing reader must not leave the others fail-fast
+    }
+    out.ms = millis() - t0;
+    resumeScan();
+    LogBuffer::getInstance().logPrintf("NFCManager: lane %u test (NSS=%u BUSY=%u): %s (%lu ms)%s\n",
+                                       (unsigned)(lane + 1), (unsigned)pins.nss, (unsigned)pins.busy,
+                                       out.reader, (unsigned long)out.ms,
+                                       (!out.online && out.answers) ? " - restart to start scanning it" : "");
+    return true;
+#else
+    (void)lane;
+    return false;
+#endif
+}

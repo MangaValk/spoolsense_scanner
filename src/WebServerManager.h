@@ -102,6 +102,10 @@ private:
 
     // API handlers
     void handleApiStatus();
+    // Multi-reader lanes (WebLanes.cpp)
+    void handleApiLanes();
+    void handleApiLaneTest();
+    void serializeLanes(JsonDocument& doc);
     void handleApiWriteTag();
     void handleApiFormatTag();
     void handleApiWriteTigerTag();

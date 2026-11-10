@@ -280,6 +280,10 @@ const char CONFIG_HTML[] PROGMEM = R"rawliteral(
                   </label>
                   <span id="lane_max_hint" class="hint"></span>
                   <div id="lane_rows" style="display:grid;grid-template-columns:auto 1fr 1fr;gap:6px 8px;margin-top:8px;align-items:center"></div>
+                  <div id="lane_status_box" style="display:none;margin-top:12px">
+                    <div class="hint" style="margin-bottom:6px">Readers (as running now). Test checks one lane's reader over its own wires.</div>
+                    <div id="lane_status" style="display:grid;grid-template-columns:auto 1fr auto;gap:6px 8px;align-items:center;font-size:0.85em"></div>
+                  </div>
                 </details>
               </div>
               <div class="toggle-row">
@@ -381,7 +385,45 @@ const char CONFIG_HTML[] PROGMEM = R"rawliteral(
       });
       count.addEventListener('input', showLaneRows);
       showLaneRows();
+      loadLaneStatus();
     }
+    // Running lanes (GET /api/lanes) with a per-lane reader Test button
+    function loadLaneStatus() {
+      fetch('/api/lanes').then(function(r) { return r.json(); }).then(function(d) {
+        if (!d.lanes || d.lane_count < 2) return;
+        document.getElementById('lane_status_box').style.display = '';
+        var box = document.getElementById('lane_status');
+        box.innerHTML = '';
+        d.lanes.forEach(function(l) {
+          var name = document.createElement('span');
+          name.textContent = 'Lane ' + l.lane + ' (' + l.device_id + ')';
+          var info = document.createElement('span');
+          info.id = 'lane_info_' + l.lane;
+          info.textContent = (l.online ? l.reader : 'no reader') +
+            (l.present ? ' \u2014 tag ' + l.uid + (l.tag_format ? ' (' + l.tag_format + ')' : '') : '');
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.textContent = 'Test';
+          btn.onclick = function() { testLane(l.lane, btn); };
+          box.appendChild(name); box.appendChild(info); box.appendChild(btn);
+        });
+      }).catch(function() {});
+    }
+    function testLane(lane, btn) {
+      var info = document.getElementById('lane_info_' + lane);
+      btn.disabled = true;
+      info.textContent = 'testing\u2026';
+      fetch('/api/lanes/test?lane=' + lane, { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(t) {
+          if (t.error) { info.textContent = t.error; return; }
+          info.textContent = (t.answers ? 'OK: ' + t.reader : 'no reader on NSS ' + t.nss + ' / BUSY ' + t.busy) +
+            (t.restart_needed ? ' \u2014 restart to start scanning it' : '') + ' (' + t.ms + ' ms)';
+        })
+        .catch(function() { info.textContent = 'test failed'; })
+        .then(function() { btn.disabled = false; });
+    }
+
     function laneBody(body) {
       if (document.getElementById('lanes_field').style.display === 'none') return;  // keep current
       body.lane_count = parseInt(document.getElementById('lane_count').value) || 1;

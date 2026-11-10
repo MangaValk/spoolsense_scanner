@@ -123,6 +123,16 @@ struct NFCLaneState {
     bool online = true;
 };
 
+// Result of probing one lane's reader (NFCManager::testLane)
+struct LaneTestResult {
+    bool online;           // lane was scanning before the test
+    bool answers;          // a reader answered on the lane's pins
+    char reader[24];       // e.g. "PN5180 v4.0", or "no reader"
+    uint8_t nss;
+    uint8_t busy;
+    uint32_t ms;           // how long the probe took
+};
+
 class NFCManager {
 public:
     static NFCManager& getInstance();
@@ -157,6 +167,10 @@ public:
     // Lane whose reader currently holds the tag with this UID (hex), or -1.
     // Lets UID-keyed work (deductions, Spoolman results) reach the right reader.
     int laneOfTag(const char* uid);
+    // Probe one lane's reader (config page "Test" button): pauses scanning at a
+    // safe point, checks the reader on the lane's pins (a temporary connection
+    // if the lane is offline), then resumes. Takes up to ~5 s. Not on the scan task.
+    bool testLane(uint8_t lane, LaneTestResult& out);
 
     // Cooperative diagnostic pause for the self-test wizard (#253). Unlike
     // pauseScanTask()/vTaskSuspend, the scan task only stops at its safe loop
