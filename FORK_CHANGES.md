@@ -19,10 +19,12 @@ BoxTurtle/AFC lane). Each lane appears to the middleware and Home Assistant as i
 | `8152bdc` | `ml/05-lane-mqtt` | `<id>-L<n>` virtual scanners: MQTT, HA discovery per lane, command routing. |
 | `5a8e721` | `ml/06-web-lanes` | `/api/lanes`, the per-lane reader test, the lanes list on the config page. |
 | merge | `fix/usb-serial-tx-timeout` | The boot stall fix, sent upstream as SpoolSense/spoolsense_scanner#342. |
-| merge | `fix/pn5180-rf-status-bit` | `setRF_on/off` check RF_STATUS bit 17 (TX_RF_STATUS), not bit 20; idle cycle 1.4 s -> 0.28 s. Upstream PR candidate. |
-| merge | `fix/redetect-loop` | `isDuplicateSpool()` marks the current tag seen again; ends the reset/re-detect loop after `requestCurrentSpool()` (138 → 1 re-detects in 26 s). Upstream PR candidate. |
-| merge | `fix/iso15693-write-capacity` | Refuse OpenPrintTag writes to ISO15693 tags that are too small or to NFC-A tags (NTAG); `last_write` in `/api/status`, `request_id` from `/api/write-tag`; writer page shows the reason. Upstream PR candidate. |
-| merge | `fix/reread-after-write` | `forceRescan()` also clears `lastSeen*`, so a tag left on the reader is re-read after a write (writer pages no longer end in "Verification timed out"). Upstream PR candidate. |
+| merge | `fix/pn5180-rf-status-bit` | `setRF_on/off` check RF_STATUS bit 17 (TX_RF_STATUS), not bit 20; idle cycle 1.4 s -> 0.28 s. Sent upstream as #343. |
+| merge | `fix/redetect-loop` | `isDuplicateSpool()` marks the current tag seen again; ends the reset/re-detect loop after `requestCurrentSpool()` (138 → 1 re-detects in 26 s). Sent upstream as #344. |
+| merge | `fix/iso15693-write-capacity` | Refuse OpenPrintTag writes to ISO15693 tags that are too small or to NFC-A tags (NTAG); `last_write` and `?write_id=N` in `/api/status` (last 9 results kept, `expired` for dropped ones), `request_id` from every write endpoint; writer page shows the reason. Sent upstream as #345. Its review-round commits are synced by hand (`multilane: sync fix/iso15693-write-capacity review N`), because a re-merge conflicts everywhere. |
+| merge | `fix/reread-after-write` | `forceRescan()` also clears `lastSeen*`, so a tag left on the reader is re-read after a write (writer pages no longer end in "Verification timed out"). Sent upstream as #346. |
+| merge | `fix/opentag3d-material-length` | The OpenTag3D writer page splits a modifier suffix (`PETG-CF`) off and limits the base material to the 5 characters the tag holds, so its verify matches. Sent upstream as #347. |
+| merge | `fix/pn532-uid-length` | The PN532 connection refuses UIDs longer than 8 bytes before they reach the 8-byte buffers. Sent upstream as #348. |
 
 ## New files (fork only, never conflict)
 
@@ -84,7 +86,10 @@ When a merge conflicts in one of these places, re-apply the "why" on top of the 
 | `src/main.cpp` | `setup()` | `Serial.setTxTimeoutMs(0)` (#342). |
 | `lib/PN5180/PN5180.{h,cpp}` | `setRF_on()`, `setRF_off()`, `RF_STATUS_TX_RF_ON` | Field-state check uses bit 17 (fix branch). |
 | `src/NFCManager.cpp` | `isDuplicateSpool()` first branch | Re-arm `lastSeen*` (fix branch; on `multilane` with `scan_->`). |
-| `src/NFCManager.cpp`, `NFCManager.h`, `HardwareNFCConnection.*`, `NFCConnectionI.h`, `WebServerManager.cpp`, `SharedJS.h` | `tagCanHold()`, `last_write` | Fix branch; on `multilane` with `scan_->`. |
+| `src/NFCManager.cpp`, `NFCManager.h`, `HardwareNFCConnection.*`, `NFCConnectionI.h`, `WebServerManager.cpp`, `SharedJS.h` | `tagCanHold()`, `processWriteQueue()`, `executeAtomicWrite()`, write results (`getWriteResult`, `WRITE_QUEUE_LEN`), every write endpoint's reply, `last_write` | #345; on `multilane` with `scan_->`. `NFCManagerLanes.cpp` uses `WRITE_QUEUE_LEN` too. |
+| `src/NFCManager.cpp` | `forceRescan()` | Also clears `lastSeen*` (#346). |
+| `src/OpenTag3DWriterHTML.h` | `buildPayload()` | Modifier split, 5-character base material (#347). |
+| `src/HardwareNFCConnectionPN532.cpp` | `detectTag()`, `MAX_SUPPORTED_UID_LEN` | Read into a 255-byte buffer, refuse UIDs over 8 (#348). |
 | `test/native/Makefile` | all, test, clean, rules | `test_lane_config`, `test_lane_ids`. |
 
 **Line endings:** upstream stores `src/ApplicationManager.h`, `src/NFCConnectionI.h` and `src/NFCWriteTypes.h` with
