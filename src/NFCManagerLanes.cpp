@@ -85,7 +85,7 @@ bool NFCManager::beginExtraLanes() {
         const NfcReaderPins pins = NfcReaderPins::forLane(i);
         lane.online = false;
         memset(&lane.currentSpool, 0, sizeof(lane.currentSpool));
-        lane.writeQueue = xQueueCreate(8, sizeof(NFCWriteRequest));
+        lane.writeQueue = xQueueCreate(WRITE_QUEUE_LEN, sizeof(NFCWriteRequest));
         lane.connection_ = createLaneConnection(pins);
         lane.ownsConnection_ = lane.connection_ != nullptr;
         if (lane.writeQueue == nullptr || lane.connection_ == nullptr) {
